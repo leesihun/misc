@@ -1,7 +1,7 @@
 """
 warpage_to_hdf5.py
 ==================
-Convert Abaqus .inp mesh + warpage .txt raster files → HDF5 dataset
+Convert ANSYS APDL .inp mesh + warpage .txt raster files → HDF5 dataset
 following DATASET_FORMAT.md.
 
 Usage
@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import warnings
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -85,38 +86,70 @@ class Config:
 
 
 # ---------------------------------------------------------------------------
-# Abaqus .inp element face tables
+# ANSYS APDL element face tables
 # ---------------------------------------------------------------------------
 
-# Maps element type prefix → face definitions as tuples of LOCAL corner indices.
-# For quadratic elements (C3D10, C3D20) only the first N corner slots are used
-# (truncated during parsing), so indices here stay 0-based within the corners.
+# Maps ANSYS element name → face definitions as tuples of LOCAL corner indices.
+# For quadratic elements only the first N corner nodes are used.
 ELEMENT_FACES: dict[str, list[tuple[int, ...]]] = {
-    "C3D4":  [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
-    "C3D10": [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],  # corners 0-3
-    "C3D8":  [
+    # 4-node tet (SOLID72, SOLID285)
+    "SOLID72":  [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
+    "SOLID285": [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
+    # 10-node tet — corners 0-3 (SOLID87, SOLID92, SOLID187)
+    "SOLID87":  [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
+    "SOLID92":  [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
+    "SOLID187": [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)],
+    # 8-node hex (SOLID45, SOLID185)
+    "SOLID45":  [
         (0, 1, 2, 3), (4, 5, 6, 7),
         (0, 1, 5, 4), (1, 2, 6, 5),
         (2, 3, 7, 6), (3, 0, 4, 7),
     ],
-    "C3D20": [
+    "SOLID185": [
         (0, 1, 2, 3), (4, 5, 6, 7),
         (0, 1, 5, 4), (1, 2, 6, 5),
         (2, 3, 7, 6), (3, 0, 4, 7),
-    ],  # corners 0-7
-    "S3":    [(0, 1, 2)],
-    "S4":    [(0, 1, 2, 3)],
-    # Aliases
-    "C3D6":  [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
-    "C3D15": [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
+    ],
+    # 20-node hex — corners 0-7 (SOLID95, SOLID186)
+    "SOLID95":  [
+        (0, 1, 2, 3), (4, 5, 6, 7),
+        (0, 1, 5, 4), (1, 2, 6, 5),
+        (2, 3, 7, 6), (3, 0, 4, 7),
+    ],
+    "SOLID186": [
+        (0, 1, 2, 3), (4, 5, 6, 7),
+        (0, 1, 5, 4), (1, 2, 6, 5),
+        (2, 3, 7, 6), (3, 0, 4, 7),
+    ],
+    # 6-node wedge/prism (SOLID90)
+    "SOLID90": [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
+    # Shell elements (always exterior)
+    "SHELL41":  [(0, 1, 2, 3)],
+    "SHELL43":  [(0, 1, 2, 3)],
+    "SHELL63":  [(0, 1, 2, 3)],
+    "SHELL93":  [(0, 1, 2, 3)],
+    "SHELL181": [(0, 1, 2, 3)],
+    "SHELL281": [(0, 1, 2, 3)],
 }
 
 # How many leading nodes to keep as corners per element type
 CORNER_COUNT: dict[str, int] = {
-    "C3D4": 4, "C3D10": 4,
-    "C3D8": 8, "C3D20": 8,
-    "S3": 3, "S4": 4,
-    "C3D6": 6, "C3D15": 6,
+    "SOLID72": 4, "SOLID285": 4,
+    "SOLID87": 4, "SOLID92": 4, "SOLID187": 4,
+    "SOLID45": 8, "SOLID185": 8,
+    "SOLID95": 8, "SOLID186": 8,
+    "SOLID90": 6,
+    "SHELL41": 4, "SHELL43": 4, "SHELL63": 4,
+    "SHELL93": 4, "SHELL181": 4, "SHELL281": 4,
+}
+
+# ANSYS element type number → name (for ET,itype,number syntax)
+APDL_TYPE_BY_NUMBER: dict[int, str] = {
+    45: "SOLID45", 72: "SOLID72", 87: "SOLID87", 90: "SOLID90",
+    92: "SOLID92", 95: "SOLID95",
+    185: "SOLID185", 186: "SOLID186", 187: "SOLID187", 285: "SOLID285",
+    41: "SHELL41", 43: "SHELL43", 63: "SHELL63",
+    93: "SHELL93", 181: "SHELL181", 281: "SHELL281",
 }
 
 
@@ -131,12 +164,12 @@ def _get_face_table(etype: str) -> tuple[list[tuple[int, ...]], int]:
 
 
 # ---------------------------------------------------------------------------
-# Section 1: Abaqus .inp Parser
+# Section 1: ANSYS APDL Parser
 # ---------------------------------------------------------------------------
 
 @dataclass
 class AbaqusMesh:
-    """Parsed Abaqus mesh data."""
+    """Parsed mesh data (node/element topology)."""
     # global_node_id -> [x, y, z]
     nodes: dict[int, np.ndarray] = field(default_factory=dict)
     # global_element_id -> list of global node ids (corner nodes only)
@@ -149,197 +182,232 @@ class AbaqusMesh:
     part_names: list[str] = field(default_factory=list)
 
 
-def parse_inp(inp_path: Path) -> AbaqusMesh:
+def parse_apdl(inp_path: Path) -> AbaqusMesh:
     """
-    Parse an Abaqus .inp file using a line-by-line state machine.
+    Parse an ANSYS APDL (.inp / .cdb / .dat) file.
 
     Handles:
-    - *Node / *Element sections (with multi-line continuation via trailing comma)
-    - *Part / *End Part / *Instance scoping
-    - Assembly-style files with instance node/element ID offsets
-    - Quadratic elements (C3D10, C3D20) — only corner nodes kept
+    - ET,itype,ename: element type definitions
+    - TYPE,itype: set current element type
+    - NBLOCK: bulk node definitions (fixed-width FORTRAN format)
+    - EBLOCK: bulk element definitions
+    - N,nid,x,y,z: individual node commands
+    - E,n1,...: individual element commands (auto-incremented ID)
+    - EN,eid,n1,...: individual element commands with explicit ID
     """
     mesh = AbaqusMesh()
 
-    STATE_IDLE = "IDLE"
-    STATE_NODE = "NODE"
-    STATE_ELEMENT = "ELEMENT"
+    # ET command map: type_number → element name string
+    et_map: dict[int, str] = {}
+    current_type_num: int = 1
+    auto_eid: int = 0  # counter for E, command (no explicit ID)
 
-    def _keyword_is(upper_line: str, keyword: str) -> bool:
-        """Check that a keyword line matches exactly (not as prefix of another word).
-        e.g. '*NODE' matches '*Node' and '*Node, nset=All' but NOT '*Node Output'.
-        """
-        if not upper_line.startswith(keyword):
-            return False
-        rest = upper_line[len(keyword):]
-        return not rest or rest[0] in (",", " ", "\t")
+    def _resolve_etype(type_num: int) -> str:
+        return et_map.get(type_num, "SOLID185").upper()
+
+    STATE_IDLE    = "IDLE"
+    STATE_NBLOCK  = "NBLOCK"
+    STATE_EBLOCK  = "EBLOCK"
+    STATE_CMBLOCK = "CMBLOCK"
 
     state = STATE_IDLE
-    current_elem_type = ""
-    current_part_idx = 0
-    current_part_name = ""
+    nblock_n_int = 3  # number of leading integer fields per NBLOCK data line
 
-    # For assembly-style files, instances get node/element ID offsets
-    # instance_name -> (node_offset, elem_offset)
-    instance_offsets: dict[str, tuple[int, int]] = {}
-    current_instance_name = ""
-    node_offset = 0
-    elem_offset = 0
+    # EBLOCK per-element accumulation
+    eblock_pending_eid:  int       = -1
+    eblock_pending_type: int       = 1
+    eblock_need_nodes:   int       = 0
+    eblock_nodes_so_far: list[int] = []
 
-    # Accumulated line buffer for multi-line element definitions
-    pending_tokens: list[str] = []
-    pending_elem_id: int = -1
+    face_tables: dict[int, list[tuple[int, ...]]] = {}
 
-    # Track max node/elem IDs to compute offsets for instances
-    max_node_id = 0
-    max_elem_id = 0
-
-    face_tables: dict[int, list[tuple[int, ...]]] = {}  # elem_id -> faces
-
-    def flush_element():
-        """Commit a completed element definition."""
-        nonlocal pending_elem_id, pending_tokens
-        if pending_elem_id < 0 or not pending_tokens:
-            return
-        faces, n_corners = _get_face_table(current_elem_type)
-        node_ids = [int(t) + node_offset for t in pending_tokens]
+    def commit_element(eid: int, type_num: int, node_ids: list[int]) -> None:
+        ename = _resolve_etype(type_num)
+        faces, n_corners = _get_face_table(ename)
         if n_corners > 0:
             node_ids = node_ids[:n_corners]
-        global_eid = pending_elem_id + elem_offset
-        mesh.elements[global_eid] = node_ids
-        mesh.elem_types[global_eid] = current_elem_type
+        mesh.elements[eid] = node_ids
+        mesh.elem_types[eid] = ename
         if faces:
-            face_tables[global_eid] = faces
-        # Part assignment for element
-        # (propagate to nodes later)
+            face_tables[eid] = faces
         for nid in node_ids:
             if nid not in mesh.node_part:
-                mesh.node_part[nid] = current_part_idx
-        pending_elem_id = -1
-        pending_tokens = []
+                mesh.node_part[nid] = 0
 
     with open(inp_path, "r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
-            line = raw_line.strip()
-            if not line or line.startswith("**"):  # blank or comment
+            # Strip trailing newline only; preserve leading spaces for detection
+            line = raw_line.rstrip("\n")
+            stripped = line.strip()
+
+            if not stripped:
                 continue
 
-            if line.startswith("*"):
-                # Flush any pending element before switching section
-                flush_element()
-                state = STATE_IDLE
-                upper = line.upper()
-
-                # ---- Part / Instance scoping ----
-                if _keyword_is(upper, "*PART"):
-                    opts = _parse_keyword_opts(line)
-                    name = opts.get("NAME", f"Part-{len(mesh.part_names)}")
-                    if name not in mesh.part_names:
-                        mesh.part_names.append(name)
-                    current_part_idx = mesh.part_names.index(name)
-                    current_part_name = name
-                    node_offset = 0
-                    elem_offset = 0
-
-                elif upper.startswith("*END PART"):
-                    node_offset = 0
-                    elem_offset = 0
-
-                elif _keyword_is(upper, "*INSTANCE"):
-                    opts = _parse_keyword_opts(line)
-                    inst_name = opts.get("NAME", "")
-                    part_ref = opts.get("PART", current_part_name)
-                    current_instance_name = inst_name
-
-                    if part_ref not in mesh.part_names:
-                        mesh.part_names.append(part_ref)
-                    current_part_idx = mesh.part_names.index(part_ref)
-
-                    # Assign offsets so instance nodes don't collide
-                    node_offset = max_node_id
-                    elem_offset = max_elem_id
-                    instance_offsets[inst_name] = (node_offset, elem_offset)
-
-                elif upper.startswith("*END INSTANCE"):
-                    node_offset = 0
-                    elem_offset = 0
-
-                # ---- Node section ----
-                elif _keyword_is(upper, "*NODE"):
-                    state = STATE_NODE
-
-                # ---- Element section ----
-                elif _keyword_is(upper, "*ELEMENT"):
-                    opts = _parse_keyword_opts(line)
-                    current_elem_type = opts.get("TYPE", "C3D4").upper()
-                    state = STATE_ELEMENT
-
-                # ---- Unsupported include ----
-                elif _keyword_is(upper, "*INCLUDE"):
-                    opts = _parse_keyword_opts(line)
-                    inc_file = opts.get("INPUT", "?")
-                    log.warning(
-                        "*Include detected (input=%s) — not followed. "
-                        "Nodes/elements in included files will be missing.",
-                        inc_file,
-                    )
-
-                # All other keywords → IDLE
+            # Strip inline APDL comment character
+            content = stripped.split("!")[0].strip()
+            if not content:
                 continue
 
-            # ---- Data lines ----
-            if state == STATE_NODE:
-                tokens = [t.strip() for t in line.split(",") if t.strip()]
-                if len(tokens) < 4:
+            # ----------------------------------------------------------------
+            # NBLOCK data mode
+            # ----------------------------------------------------------------
+            if state == STATE_NBLOCK:
+                if content.startswith("-1"):
+                    state = STATE_IDLE
                     continue
-                nid = int(tokens[0]) + node_offset
-                xyz = np.array([float(tokens[1]), float(tokens[2]), float(tokens[3])],
-                               dtype=np.float64)
-                mesh.nodes[nid] = xyz
+                # Format line: (3i8,6e16.9) — parse to get integer field count
+                if content.startswith("("):
+                    m = re.match(r"\(\s*(\d+)\s*[iI]", content)
+                    if m:
+                        nblock_n_int = int(m.group(1))
+                    continue
+                tokens = content.split()
+                # Need at least nblock_n_int ints + 3 floats (x, y, z)
+                if len(tokens) < nblock_n_int + 3:
+                    continue
+                try:
+                    nid = int(tokens[0])
+                    x   = float(tokens[nblock_n_int])
+                    y   = float(tokens[nblock_n_int + 1])
+                    z   = float(tokens[nblock_n_int + 2])
+                except (ValueError, IndexError):
+                    continue
+                mesh.nodes[nid] = np.array([x, y, z], dtype=np.float64)
                 if nid not in mesh.node_part:
-                    mesh.node_part[nid] = current_part_idx
-                max_node_id = max(max_node_id, nid)
+                    mesh.node_part[nid] = 0
+                continue
 
-            elif state == STATE_ELEMENT:
-                tokens = [t.strip() for t in line.rstrip(",").split(",")
-                          if t.strip()]
-                is_continuation = line.endswith(",")  # raw line ends with comma
+            # ----------------------------------------------------------------
+            # EBLOCK data mode
+            # ----------------------------------------------------------------
+            if state == STATE_EBLOCK:
+                if content.startswith("-1"):
+                    state = STATE_IDLE
+                    continue
+                if content.startswith("("):
+                    continue
+                try:
+                    tokens = [int(t) for t in content.split()]
+                except ValueError:
+                    continue
 
-                if pending_elem_id < 0:
-                    # First line of an element: first token is element ID
-                    if not tokens:
+                if eblock_need_nodes == 0:
+                    # First line of a new element record
+                    # Layout: mat type real secn esys death solidm shape nodes user eid n1 n2 ...
+                    if len(tokens) < 11:
                         continue
-                    pending_elem_id = int(tokens[0])
-                    max_elem_id = max(max_elem_id, pending_elem_id + elem_offset)
-                    pending_tokens = tokens[1:]
+                    type_num  = tokens[1]
+                    n_nodes   = tokens[8]
+                    eid       = tokens[10]
+                    node_ids  = tokens[11:]
+                    eblock_pending_eid  = eid
+                    eblock_pending_type = type_num
+                    eblock_nodes_so_far = node_ids
+                    eblock_need_nodes   = n_nodes
+                    if len(eblock_nodes_so_far) >= eblock_need_nodes:
+                        commit_element(eblock_pending_eid, eblock_pending_type,
+                                       eblock_nodes_so_far[:eblock_need_nodes])
+                        eblock_need_nodes = 0
                 else:
-                    # Continuation line
-                    pending_tokens.extend(tokens)
+                    # Continuation line with remaining node IDs
+                    eblock_nodes_so_far.extend(tokens)
+                    if len(eblock_nodes_so_far) >= eblock_need_nodes:
+                        commit_element(eblock_pending_eid, eblock_pending_type,
+                                       eblock_nodes_so_far[:eblock_need_nodes])
+                        eblock_need_nodes = 0
+                continue
 
-                if not is_continuation:
-                    flush_element()
+            # ----------------------------------------------------------------
+            # CMBLOCK — skip until terminator
+            # ----------------------------------------------------------------
+            if state == STATE_CMBLOCK:
+                if content.startswith("-1"):
+                    state = STATE_IDLE
+                continue
 
-    flush_element()  # catch last element at EOF
+            # ----------------------------------------------------------------
+            # Command parsing (IDLE state)
+            # ----------------------------------------------------------------
+            # Split on comma; first token is the command
+            parts = [p.strip() for p in content.split(",")]
+            cmd   = parts[0].upper()
+            args  = parts[1:]
 
-    # Store face table for topology step
+            # Skip section markers, macro lines, and pure comments
+            if not cmd or cmd.startswith("/") or cmd.startswith("*"):
+                continue
+
+            if cmd == "ET":
+                # ET,itype,ename_or_number[,kop...]
+                if len(args) >= 2:
+                    try:
+                        itype    = int(args[0])
+                        raw_name = args[1].strip().upper()
+                        try:
+                            # Numeric form: ET,1,185
+                            et_map[itype] = APDL_TYPE_BY_NUMBER.get(
+                                int(raw_name), f"TYPE{raw_name}"
+                            )
+                        except ValueError:
+                            # Named form: ET,1,SOLID185
+                            et_map[itype] = raw_name
+                    except (ValueError, IndexError):
+                        pass
+
+            elif cmd == "TYPE":
+                if args:
+                    try:
+                        current_type_num = int(args[0])
+                    except ValueError:
+                        pass
+
+            elif cmd == "NBLOCK":
+                state        = STATE_NBLOCK
+                nblock_n_int = 3  # reset; format line will update
+
+            elif cmd == "EBLOCK":
+                state               = STATE_EBLOCK
+                eblock_need_nodes   = 0
+                eblock_nodes_so_far = []
+
+            elif cmd == "CMBLOCK":
+                state = STATE_CMBLOCK
+
+            elif cmd == "N":
+                # N,nid,x,y,z[,rx,ry,rz]
+                if len(args) >= 4:
+                    try:
+                        nid = int(args[0])
+                        x, y, z = float(args[1]), float(args[2]), float(args[3])
+                        mesh.nodes[nid] = np.array([x, y, z], dtype=np.float64)
+                        if nid not in mesh.node_part:
+                            mesh.node_part[nid] = 0
+                    except (ValueError, IndexError):
+                        pass
+
+            elif cmd in ("E", "EN"):
+                # EN,eid,n1,n2,...  or  E,n1,n2,... (auto EID)
+                try:
+                    if cmd == "EN":
+                        eid      = int(args[0])
+                        node_ids = [int(a) for a in args[1:] if a]
+                    else:
+                        auto_eid += 1
+                        eid      = auto_eid
+                        node_ids = [int(a) for a in args if a]
+                    commit_element(eid, current_type_num, node_ids)
+                except (ValueError, IndexError):
+                    pass
+
+    if not mesh.part_names:
+        mesh.part_names.append("Part-0")
+
     mesh._face_tables = face_tables  # type: ignore[attr-defined]
     log.info(
-        "Parsed %d nodes, %d elements, %d parts from %s",
-        len(mesh.nodes), len(mesh.elements), len(mesh.part_names), inp_path.name,
+        "Parsed %d nodes, %d elements from %s",
+        len(mesh.nodes), len(mesh.elements), inp_path.name,
     )
     return mesh
-
-
-def _parse_keyword_opts(line: str) -> dict[str, str]:
-    """Parse key=value options from an Abaqus keyword line."""
-    parts = line.split(",")
-    opts: dict[str, str] = {}
-    for p in parts[1:]:
-        p = p.strip()
-        if "=" in p:
-            k, _, v = p.partition("=")
-            opts[k.strip().upper()] = v.strip()
-    return opts
 
 
 # ---------------------------------------------------------------------------
@@ -811,8 +879,8 @@ def write_global_metadata(
 
 def run_pipeline(config: Config) -> None:
     # 1. Parse mesh
-    log.info("Parsing Abaqus mesh: %s", config.inp_path)
-    mesh = parse_inp(config.inp_path)
+    log.info("Parsing ANSYS APDL mesh: %s", config.inp_path)
+    mesh = parse_apdl(config.inp_path)
 
     # 2. Extract surface topology
     log.info("Extracting surface topology…")
@@ -914,11 +982,11 @@ def run_pipeline(config: Config) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Convert Abaqus .inp mesh + warpage .txt files → HDF5 dataset",
+        description="Convert ANSYS APDL .inp mesh + warpage .txt files → HDF5 dataset",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--inp", required=True, type=Path,
-                        help="Path to Abaqus .inp mesh file")
+                        help="Path to ANSYS APDL .inp mesh file")
     parser.add_argument("--warpage-dir", required=True, type=Path,
                         help="Directory containing warpage .txt files")
     parser.add_argument("--output", required=True, type=Path,
