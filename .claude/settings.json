@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/Lee/Desktop/Huni -type f \\\\\\(-name *.py -o -name *.md -o -name *.txt \\\\\\))",
+      "Bash(find c:UsersLeeDesktopHunimisc -type f \\\\\\(-name *.inp -o -name *.odb \\\\\\))",
+      "Bash(find c:UsersLeeDesktopHuniLLM_API_fast -maxdepth 2 -type f \\\\\\(-name *.py -o -name *.md -o -name *.txt \\\\\\) -not -path */venv/*)",
+      "Bash(awk 'NR==1 {print NF; print; exit}' \"c:\\\\Users\\\\Lee\\\\Desktop\\\\Huni\\\\misc\\\\20250905192955@B550657650203.txt\")",
+      "Bash(gh auth:*)"
+    ]
+  }
+}
