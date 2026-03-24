@@ -211,13 +211,16 @@ def parse_apdl(inp_path: Path) -> AbaqusMesh:
     STATE_CMBLOCK = "CMBLOCK"
 
     state = STATE_IDLE
-    nblock_n_int = 3  # number of leading integer fields per NBLOCK data line
+    nblock_n_int  = 3   # number of leading integer fields per NBLOCK data line
+    nblock_i_width = 8  # character width of each integer field
+    nblock_f_width = 16 # character width of each float field
 
     # EBLOCK per-element accumulation
     eblock_pending_eid:  int       = -1
     eblock_pending_type: int       = 1
     eblock_need_nodes:   int       = 0
     eblock_nodes_so_far: list[int] = []
+    eblock_i_width:      int       = 8  # integer field width from format line
 
     face_tables: dict[int, list[tuple[int, ...]]] = {}
 
@@ -255,21 +258,25 @@ def parse_apdl(inp_path: Path) -> AbaqusMesh:
                 if content.startswith("-1"):
                     state = STATE_IDLE
                     continue
-                # Format line: (3i8,6e16.9) — parse to get integer field count
+                # Format line: e.g. (3i8,6e16.9) or (3i9,6e21.13e3)
+                # Parse integer field count and widths for fixed-width slicing.
                 if content.startswith("("):
-                    m = re.match(r"\(\s*(\d+)\s*[iI]", content)
+                    m = re.match(r"\(\s*(\d+)\s*[iI]\s*(\d+)", content)
                     if m:
-                        nblock_n_int = int(m.group(1))
+                        nblock_n_int  = int(m.group(1))
+                        nblock_i_width = int(m.group(2))
+                    fm = re.search(r"[eEfFdD]\s*(\d+)", content)
+                    if fm:
+                        nblock_f_width = int(fm.group(1))
                     continue
-                tokens = content.split()
-                # Need at least nblock_n_int ints + 3 floats (x, y, z)
-                if len(tokens) < nblock_n_int + 3:
-                    continue
+                # Use fixed-width slicing so adjacent fields (no space) parse correctly.
                 try:
-                    nid = int(tokens[0])
-                    x   = float(tokens[nblock_n_int])
-                    y   = float(tokens[nblock_n_int + 1])
-                    z   = float(tokens[nblock_n_int + 2])
+                    int_end = nblock_n_int * nblock_i_width
+                    nid = int(raw_line[:nblock_i_width])
+                    float_start = int_end
+                    x = float(raw_line[float_start                : float_start +     nblock_f_width])
+                    y = float(raw_line[float_start +   nblock_f_width : float_start + 2*nblock_f_width])
+                    z = float(raw_line[float_start + 2*nblock_f_width : float_start + 3*nblock_f_width])
                 except (ValueError, IndexError):
                     continue
                 mesh.nodes[nid] = np.array([x, y, z], dtype=np.float64)
@@ -284,10 +291,22 @@ def parse_apdl(inp_path: Path) -> AbaqusMesh:
                 if content.startswith("-1"):
                     state = STATE_IDLE
                     continue
+                # Format line: (19i8) — capture integer field width
                 if content.startswith("("):
+                    m = re.match(r"\(\s*\d+\s*[iI]\s*(\d+)", content)
+                    if m:
+                        eblock_i_width = int(m.group(1))
                     continue
+                # Fixed-width parse: split raw_line into eblock_i_width chunks
                 try:
-                    tokens = [int(t) for t in content.split()]
+                    line_stripped = raw_line.rstrip("\n\r")
+                    tokens = []
+                    pos = 0
+                    while pos + eblock_i_width <= len(line_stripped):
+                        field = line_stripped[pos:pos + eblock_i_width].strip()
+                        if field:
+                            tokens.append(int(field))
+                        pos += eblock_i_width
                 except ValueError:
                     continue
 
@@ -440,7 +459,7 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
     for eid, local_faces in face_tables.items():
         global_nodes = mesh.elements[eid]
         etype = mesh.elem_types[eid]
-        is_shell = etype.upper().startswith("S")
+        is_shell = etype.upper().startswith("SHELL")
 
         for local_face in local_faces:
             global_face = tuple(sorted(global_nodes[i] for i in local_face
