@@ -6,23 +6,25 @@ Generate images from:
   2. A generated .h5 dataset file (B8_REV04_SEC_BOT.h5) with mesh
      colored by z-displacement (feature index 5 per DATASET_FORMAT.md)
 
+Both files are chosen via a tkinter GUI file-picker dialog.
+CLI flags (--inp, --h5) can pre-fill the paths and skip the dialog.
+
 Usage
 -----
-python visualize_mesh.py \
-    --inp  path/to/mesh.inp \
-    --h5   path/to/B8_REV04_SEC_BOT.h5 \
-    [--sample-id 1] \
-    [--output-dir ./figures] \
-    [--dpi 150] \
-    [--view {xy|xz|yz|3d}]
+python visualize_mesh.py                          # GUI for both files
+python visualize_mesh.py --inp mesh.inp           # GUI only for .h5
+python visualize_mesh.py --inp mesh.inp --h5 x.h5 # no GUI needed
 
-Dependencies: numpy, h5py, matplotlib, scipy (only for .inp parsing)
+Dependencies: numpy, h5py, matplotlib, tkinter (stdlib)
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
 import h5py
@@ -30,9 +32,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from matplotlib.collections import LineCollection
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 
 # ---------------------------------------------------------------------------
@@ -319,55 +319,212 @@ def plot_h5_zdisp(coords: np.ndarray, edges: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# GUI
+# ---------------------------------------------------------------------------
+
+class App(tk.Tk):
+    def __init__(self, init_inp: Path | None, init_h5: Path | None,
+                 init_sample: int, init_view: str,
+                 init_dpi: int, init_outdir: Path):
+        super().__init__()
+        self.title("Mesh Visualizer")
+        self.resizable(False, False)
+
+        PAD = dict(padx=8, pady=4)
+
+        # ── INP file row ──────────────────────────────────────────────────
+        tk.Label(self, text="INP mesh file:", anchor="w").grid(
+            row=0, column=0, sticky="w", **PAD)
+        self._inp_var = tk.StringVar(value=str(init_inp) if init_inp else "")
+        tk.Entry(self, textvariable=self._inp_var, width=55).grid(
+            row=0, column=1, **PAD)
+        tk.Button(self, text="Browse…", command=self._browse_inp).grid(
+            row=0, column=2, **PAD)
+        tk.Button(self, text="Clear", command=lambda: self._inp_var.set("")).grid(
+            row=0, column=3, **PAD)
+
+        # ── H5 file row ───────────────────────────────────────────────────
+        tk.Label(self, text="H5 dataset file:", anchor="w").grid(
+            row=1, column=0, sticky="w", **PAD)
+        self._h5_var = tk.StringVar(value=str(init_h5) if init_h5 else "")
+        tk.Entry(self, textvariable=self._h5_var, width=55).grid(
+            row=1, column=1, **PAD)
+        tk.Button(self, text="Browse…", command=self._browse_h5).grid(
+            row=1, column=2, **PAD)
+        tk.Button(self, text="Clear", command=lambda: self._h5_var.set("")).grid(
+            row=1, column=3, **PAD)
+
+        # ── Options row ───────────────────────────────────────────────────
+        opt_frame = tk.Frame(self)
+        opt_frame.grid(row=2, column=0, columnspan=4, sticky="w", **PAD)
+
+        tk.Label(opt_frame, text="Sample ID:").pack(side="left")
+        self._sample_var = tk.IntVar(value=init_sample)
+        tk.Spinbox(opt_frame, textvariable=self._sample_var,
+                   from_=1, to=99999, width=6).pack(side="left", padx=(2, 12))
+
+        tk.Label(opt_frame, text="View:").pack(side="left")
+        self._view_var = tk.StringVar(value=init_view)
+        ttk.Combobox(opt_frame, textvariable=self._view_var,
+                     values=["xy", "xz", "yz"], width=4,
+                     state="readonly").pack(side="left", padx=(2, 12))
+
+        tk.Label(opt_frame, text="DPI:").pack(side="left")
+        self._dpi_var = tk.IntVar(value=init_dpi)
+        tk.Spinbox(opt_frame, textvariable=self._dpi_var,
+                   from_=72, to=600, increment=25, width=5).pack(side="left", padx=(2, 12))
+
+        # ── Output dir row ────────────────────────────────────────────────
+        tk.Label(self, text="Output folder:", anchor="w").grid(
+            row=3, column=0, sticky="w", **PAD)
+        self._outdir_var = tk.StringVar(value=str(init_outdir))
+        tk.Entry(self, textvariable=self._outdir_var, width=55).grid(
+            row=3, column=1, **PAD)
+        tk.Button(self, text="Browse…", command=self._browse_outdir).grid(
+            row=3, column=2, **PAD)
+
+        # ── Status / progress ─────────────────────────────────────────────
+        self._status_var = tk.StringVar(value="Ready.")
+        tk.Label(self, textvariable=self._status_var, anchor="w",
+                 fg="navy").grid(row=4, column=0, columnspan=4,
+                                 sticky="w", **PAD)
+        self._pbar = ttk.Progressbar(self, mode="indeterminate", length=400)
+        self._pbar.grid(row=5, column=0, columnspan=4, **PAD)
+
+        # ── Generate button ───────────────────────────────────────────────
+        self._gen_btn = tk.Button(self, text="Generate images",
+                                  command=self._on_generate,
+                                  bg="#1a73e8", fg="white",
+                                  font=("sans-serif", 11, "bold"),
+                                  padx=16, pady=6)
+        self._gen_btn.grid(row=6, column=0, columnspan=4, pady=10)
+
+    # ── File dialogs ──────────────────────────────────────────────────────
+
+    def _browse_inp(self):
+        path = filedialog.askopenfilename(
+            title="Select ANSYS APDL .inp file",
+            filetypes=[("APDL input files", "*.inp *.cdb *.dat"), ("All files", "*")],
+        )
+        if path:
+            self._inp_var.set(path)
+
+    def _browse_h5(self):
+        path = filedialog.askopenfilename(
+            title="Select HDF5 dataset file",
+            filetypes=[("HDF5 files", "*.h5 *.hdf5"), ("All files", "*")],
+        )
+        if path:
+            self._h5_var.set(path)
+
+    def _browse_outdir(self):
+        path = filedialog.askdirectory(title="Select output folder")
+        if path:
+            self._outdir_var.set(path)
+
+    # ── Generate ──────────────────────────────────────────────────────────
+
+    def _on_generate(self):
+        inp_str  = self._inp_var.get().strip()
+        h5_str   = self._h5_var.get().strip()
+
+        if not inp_str and not h5_str:
+            messagebox.showerror("No files selected",
+                                 "Please select at least one file (INP or H5).")
+            return
+
+        inp_path  = Path(inp_str)  if inp_str  else None
+        h5_path   = Path(h5_str)   if h5_str   else None
+        out_dir   = Path(self._outdir_var.get().strip() or "figures")
+        sample_id = self._sample_var.get()
+        view      = self._view_var.get()
+        dpi       = self._dpi_var.get()
+
+        # Validate
+        if inp_path and not inp_path.is_file():
+            messagebox.showerror("File not found", f"INP not found:\n{inp_path}")
+            return
+        if h5_path and not h5_path.is_file():
+            messagebox.showerror("File not found", f"H5 not found:\n{h5_path}")
+            return
+
+        # Run in background thread so the GUI stays responsive
+        self._gen_btn.config(state="disabled")
+        self._pbar.start(12)
+        thread = threading.Thread(
+            target=self._generate,
+            args=(inp_path, h5_path, sample_id, view, dpi, out_dir),
+            daemon=True,
+        )
+        thread.start()
+
+    def _generate(self, inp_path, h5_path, sample_id, view, dpi, out_dir):
+        outputs = []
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if inp_path:
+                self._set_status(f"Parsing {inp_path.name}…")
+                coords, edges, part_ids = parse_inp_for_viz(inp_path)
+                self._set_status("Rendering INP mesh…")
+                fig = plot_inp_mesh(coords, edges, part_ids, view=view, dpi=dpi)
+                out = out_dir / f"inp_mesh_{view}.png"
+                fig.savefig(out, dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(str(out))
+
+            if h5_path:
+                self._set_status(f"Loading {h5_path.name} sample {sample_id}…")
+                coords, edges, z_disp, meta = load_h5_sample(h5_path, sample_id)
+                self._set_status("Rendering H5 z-disp mesh…")
+                fig = plot_h5_zdisp(coords, edges, z_disp, meta, view=view, dpi=dpi)
+                out = out_dir / f"{h5_path.stem}_zdisp_{view}.png"
+                fig.savefig(out, dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(str(out))
+
+            msg = "Saved:\n" + "\n".join(outputs)
+            self._set_status("Done. " + "  |  ".join(outputs))
+            self.after(0, lambda: messagebox.showinfo("Done", msg))
+
+        except Exception as exc:
+            self._set_status(f"Error: {exc}")
+            self.after(0, lambda: messagebox.showerror("Error", str(exc)))
+
+        finally:
+            self.after(0, self._pbar.stop)
+            self.after(0, lambda: self._gen_btn.config(state="normal"))
+
+    def _set_status(self, msg: str):
+        self.after(0, lambda: self._status_var.set(msg))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize INP mesh and H5 dataset sample.")
+    parser = argparse.ArgumentParser(
+        description="Visualize INP mesh and H5 dataset sample (GUI file picker).")
     parser.add_argument("--inp",        type=Path, default=None,
-                        help="Path to ANSYS APDL .inp file")
+                        help="Pre-fill INP path (skips that file dialog)")
     parser.add_argument("--h5",         type=Path, default=None,
-                        help="Path to dataset .h5 file (e.g. B8_REV04_SEC_BOT.h5)")
-    parser.add_argument("--sample-id",  type=int,  default=1,
-                        help="Sample ID to load from the H5 file (default: 1)")
-    parser.add_argument("--output-dir", type=Path, default=Path("figures"),
-                        help="Directory to save output images (default: ./figures)")
-    parser.add_argument("--dpi",        type=int,  default=150,
-                        help="Output image DPI (default: 150)")
-    parser.add_argument("--view",       choices=["xy", "xz", "yz"], default="xy",
-                        help="2-D projection plane (default: xy)")
-    parser.add_argument("--seed",       type=int,  default=0,
-                        help="Random seed for edge subsampling")
+                        help="Pre-fill H5 path (skips that file dialog)")
+    parser.add_argument("--sample-id",  type=int,  default=1)
+    parser.add_argument("--output-dir", type=Path, default=Path("figures"))
+    parser.add_argument("--dpi",        type=int,  default=150)
+    parser.add_argument("--view",       choices=["xy", "xz", "yz"], default="xy")
     args = parser.parse_args()
 
-    np.random.seed(args.seed)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.inp is None and args.h5 is None:
-        parser.error("Provide at least one of --inp or --h5.")
-
-    # --- Figure 1: INP mesh ---
-    if args.inp is not None:
-        print(f"\nParsing INP: {args.inp}")
-        coords, edges, part_ids = parse_inp_for_viz(args.inp)
-        fig = plot_inp_mesh(coords, edges, part_ids, view=args.view, dpi=args.dpi)
-        out = args.output_dir / f"inp_mesh_{args.view}.png"
-        fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved → {out}")
-
-    # --- Figure 2: H5 mesh colored by z-disp ---
-    if args.h5 is not None:
-        print(f"\nLoading H5: {args.h5}  (sample {args.sample_id})")
-        coords, edges, z_disp, meta = load_h5_sample(args.h5, args.sample_id)
-        fig = plot_h5_zdisp(coords, edges, z_disp, meta, view=args.view, dpi=args.dpi)
-        stem = args.h5.stem
-        out = args.output_dir / f"{stem}_zdisp_{args.view}.png"
-        fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved → {out}")
-
-    print("\nDone.")
+    app = App(
+        init_inp=args.inp,
+        init_h5=args.h5,
+        init_sample=args.sample_id,
+        init_view=args.view,
+        init_dpi=args.dpi,
+        init_outdir=args.output_dir,
+    )
+    app.mainloop()
 
 
 if __name__ == "__main__":
