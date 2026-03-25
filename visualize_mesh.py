@@ -6,25 +6,24 @@ Generate images from:
   2. A generated .h5 dataset file (B8_REV04_SEC_BOT.h5) with mesh
      colored by z-displacement (feature index 5 per DATASET_FORMAT.md)
 
-Both files are chosen via a tkinter GUI file-picker dialog.
-CLI flags (--inp, --h5) can pre-fill the paths and skip the dialog.
+Files are chosen via a PyQt5 GUI file-picker dialog.
+CLI flags (--inp, --h5) can pre-fill the paths.
 
 Usage
 -----
 python visualize_mesh.py                          # GUI for both files
-python visualize_mesh.py --inp mesh.inp           # GUI only for .h5
-python visualize_mesh.py --inp mesh.inp --h5 x.h5 # no GUI needed
+python visualize_mesh.py --inp mesh.inp           # pre-fill INP path
+python visualize_mesh.py --inp mesh.inp --h5 x.h5 # pre-fill both
 
-Dependencies: numpy, h5py, matplotlib, tkinter (stdlib)
+Dependencies: numpy, h5py, matplotlib, PyQt5
 """
 
 from __future__ import annotations
 
 import argparse
 import re
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import sys
+import traceback
 from pathlib import Path
 
 import h5py
@@ -33,6 +32,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox,
+    QFileDialog, QProgressBar, QMessageBox, QGroupBox,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -319,184 +325,233 @@ def plot_h5_zdisp(coords: np.ndarray, edges: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# GUI
+# GUI — worker thread
 # ---------------------------------------------------------------------------
 
-class App(tk.Tk):
+class Worker(QThread):
+    status  = pyqtSignal(str)
+    done    = pyqtSignal(list)   # list of saved paths
+    error   = pyqtSignal(str)
+
+    def __init__(self, inp_path, h5_path, sample_id, view, dpi, out_dir):
+        super().__init__()
+        self.inp_path  = inp_path
+        self.h5_path   = h5_path
+        self.sample_id = sample_id
+        self.view      = view
+        self.dpi       = dpi
+        self.out_dir   = out_dir
+
+    def run(self):
+        outputs = []
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+
+            if self.inp_path:
+                self.status.emit(f"Parsing {self.inp_path.name}…")
+                coords, edges, part_ids = parse_inp_for_viz(self.inp_path)
+                self.status.emit("Rendering INP mesh…")
+                fig = plot_inp_mesh(coords, edges, part_ids,
+                                    view=self.view, dpi=self.dpi)
+                out = self.out_dir / f"inp_mesh_{self.view}.png"
+                fig.savefig(out, dpi=self.dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(str(out))
+
+            if self.h5_path:
+                self.status.emit(f"Loading {self.h5_path.name} sample {self.sample_id}…")
+                coords, edges, z_disp, meta = load_h5_sample(self.h5_path, self.sample_id)
+                self.status.emit("Rendering H5 z-disp mesh…")
+                fig = plot_h5_zdisp(coords, edges, z_disp, meta,
+                                    view=self.view, dpi=self.dpi)
+                out = self.out_dir / f"{self.h5_path.stem}_zdisp_{self.view}.png"
+                fig.savefig(out, dpi=self.dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(str(out))
+
+            self.done.emit(outputs)
+
+        except Exception:
+            self.error.emit(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# GUI — main window
+# ---------------------------------------------------------------------------
+
+class App(QWidget):
     def __init__(self, init_inp: Path | None, init_h5: Path | None,
                  init_sample: int, init_view: str,
                  init_dpi: int, init_outdir: Path):
         super().__init__()
-        self.title("Mesh Visualizer")
-        self.resizable(False, False)
+        self.setWindowTitle("Mesh Visualizer")
+        self.setMinimumWidth(620)
+        self._worker = None
 
-        PAD = dict(padx=8, pady=4)
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(14, 14, 14, 14)
 
-        # ── INP file row ──────────────────────────────────────────────────
-        tk.Label(self, text="INP mesh file:", anchor="w").grid(
-            row=0, column=0, sticky="w", **PAD)
-        self._inp_var = tk.StringVar(value=str(init_inp) if init_inp else "")
-        tk.Entry(self, textvariable=self._inp_var, width=55).grid(
-            row=0, column=1, **PAD)
-        tk.Button(self, text="Browse…", command=self._browse_inp).grid(
-            row=0, column=2, **PAD)
-        tk.Button(self, text="Clear", command=lambda: self._inp_var.set("")).grid(
-            row=0, column=3, **PAD)
+        # ── INP file ──────────────────────────────────────────────────────
+        inp_box = QGroupBox("INP mesh file")
+        inp_lay = QHBoxLayout(inp_box)
+        self._inp_edit = QLineEdit(str(init_inp) if init_inp else "")
+        self._inp_edit.setPlaceholderText("(none selected)")
+        inp_lay.addWidget(self._inp_edit)
+        btn_inp = QPushButton("Browse…")
+        btn_inp.clicked.connect(self._browse_inp)
+        inp_lay.addWidget(btn_inp)
+        btn_inp_clr = QPushButton("Clear")
+        btn_inp_clr.clicked.connect(lambda: self._inp_edit.clear())
+        inp_lay.addWidget(btn_inp_clr)
+        root.addWidget(inp_box)
 
-        # ── H5 file row ───────────────────────────────────────────────────
-        tk.Label(self, text="H5 dataset file:", anchor="w").grid(
-            row=1, column=0, sticky="w", **PAD)
-        self._h5_var = tk.StringVar(value=str(init_h5) if init_h5 else "")
-        tk.Entry(self, textvariable=self._h5_var, width=55).grid(
-            row=1, column=1, **PAD)
-        tk.Button(self, text="Browse…", command=self._browse_h5).grid(
-            row=1, column=2, **PAD)
-        tk.Button(self, text="Clear", command=lambda: self._h5_var.set("")).grid(
-            row=1, column=3, **PAD)
+        # ── H5 file ───────────────────────────────────────────────────────
+        h5_box = QGroupBox("H5 dataset file")
+        h5_lay = QHBoxLayout(h5_box)
+        self._h5_edit = QLineEdit(str(init_h5) if init_h5 else "")
+        self._h5_edit.setPlaceholderText("(none selected)")
+        h5_lay.addWidget(self._h5_edit)
+        btn_h5 = QPushButton("Browse…")
+        btn_h5.clicked.connect(self._browse_h5)
+        h5_lay.addWidget(btn_h5)
+        btn_h5_clr = QPushButton("Clear")
+        btn_h5_clr.clicked.connect(lambda: self._h5_edit.clear())
+        h5_lay.addWidget(btn_h5_clr)
+        root.addWidget(h5_box)
 
-        # ── Options row ───────────────────────────────────────────────────
-        opt_frame = tk.Frame(self)
-        opt_frame.grid(row=2, column=0, columnspan=4, sticky="w", **PAD)
+        # ── Options ───────────────────────────────────────────────────────
+        opt_box = QGroupBox("Options")
+        opt_lay = QHBoxLayout(opt_box)
 
-        tk.Label(opt_frame, text="Sample ID:").pack(side="left")
-        self._sample_var = tk.IntVar(value=init_sample)
-        tk.Spinbox(opt_frame, textvariable=self._sample_var,
-                   from_=1, to=99999, width=6).pack(side="left", padx=(2, 12))
+        opt_lay.addWidget(QLabel("Sample ID:"))
+        self._sample_spin = QSpinBox()
+        self._sample_spin.setRange(1, 99999)
+        self._sample_spin.setValue(init_sample)
+        opt_lay.addWidget(self._sample_spin)
 
-        tk.Label(opt_frame, text="View:").pack(side="left")
-        self._view_var = tk.StringVar(value=init_view)
-        ttk.Combobox(opt_frame, textvariable=self._view_var,
-                     values=["xy", "xz", "yz"], width=4,
-                     state="readonly").pack(side="left", padx=(2, 12))
+        opt_lay.addSpacing(16)
+        opt_lay.addWidget(QLabel("View:"))
+        self._view_combo = QComboBox()
+        self._view_combo.addItems(["xy", "xz", "yz"])
+        self._view_combo.setCurrentText(init_view)
+        opt_lay.addWidget(self._view_combo)
 
-        tk.Label(opt_frame, text="DPI:").pack(side="left")
-        self._dpi_var = tk.IntVar(value=init_dpi)
-        tk.Spinbox(opt_frame, textvariable=self._dpi_var,
-                   from_=72, to=600, increment=25, width=5).pack(side="left", padx=(2, 12))
+        opt_lay.addSpacing(16)
+        opt_lay.addWidget(QLabel("DPI:"))
+        self._dpi_spin = QSpinBox()
+        self._dpi_spin.setRange(72, 600)
+        self._dpi_spin.setSingleStep(25)
+        self._dpi_spin.setValue(init_dpi)
+        opt_lay.addWidget(self._dpi_spin)
 
-        # ── Output dir row ────────────────────────────────────────────────
-        tk.Label(self, text="Output folder:", anchor="w").grid(
-            row=3, column=0, sticky="w", **PAD)
-        self._outdir_var = tk.StringVar(value=str(init_outdir))
-        tk.Entry(self, textvariable=self._outdir_var, width=55).grid(
-            row=3, column=1, **PAD)
-        tk.Button(self, text="Browse…", command=self._browse_outdir).grid(
-            row=3, column=2, **PAD)
+        opt_lay.addStretch()
+        root.addWidget(opt_box)
 
-        # ── Status / progress ─────────────────────────────────────────────
-        self._status_var = tk.StringVar(value="Ready.")
-        tk.Label(self, textvariable=self._status_var, anchor="w",
-                 fg="navy").grid(row=4, column=0, columnspan=4,
-                                 sticky="w", **PAD)
-        self._pbar = ttk.Progressbar(self, mode="indeterminate", length=400)
-        self._pbar.grid(row=5, column=0, columnspan=4, **PAD)
+        # ── Output folder ─────────────────────────────────────────────────
+        out_box = QGroupBox("Output folder")
+        out_lay = QHBoxLayout(out_box)
+        self._outdir_edit = QLineEdit(str(init_outdir))
+        out_lay.addWidget(self._outdir_edit)
+        btn_out = QPushButton("Browse…")
+        btn_out.clicked.connect(self._browse_outdir)
+        out_lay.addWidget(btn_out)
+        root.addWidget(out_box)
+
+        # ── Progress + status ─────────────────────────────────────────────
+        self._pbar = QProgressBar()
+        self._pbar.setRange(0, 0)   # indeterminate
+        self._pbar.setVisible(False)
+        root.addWidget(self._pbar)
+
+        self._status_lbl = QLabel("Ready.")
+        self._status_lbl.setAlignment(Qt.AlignLeft)
+        root.addWidget(self._status_lbl)
 
         # ── Generate button ───────────────────────────────────────────────
-        self._gen_btn = tk.Button(self, text="Generate images",
-                                  command=self._on_generate,
-                                  bg="#1a73e8", fg="white",
-                                  font=("sans-serif", 11, "bold"),
-                                  padx=16, pady=6)
-        self._gen_btn.grid(row=6, column=0, columnspan=4, pady=10)
+        self._gen_btn = QPushButton("Generate images")
+        self._gen_btn.setStyleSheet(
+            "QPushButton { background:#1a73e8; color:white; font-weight:bold;"
+            " font-size:13px; padding:8px 20px; border-radius:4px; }"
+            "QPushButton:disabled { background:#aaa; }"
+        )
+        self._gen_btn.clicked.connect(self._on_generate)
+        root.addWidget(self._gen_btn, alignment=Qt.AlignHCenter)
 
-    # ── File dialogs ──────────────────────────────────────────────────────
+    # ── Browse dialogs ────────────────────────────────────────────────────
 
     def _browse_inp(self):
-        path = filedialog.askopenfilename(
-            title="Select ANSYS APDL .inp file",
-            filetypes=[("APDL input files", "*.inp *.cdb *.dat"), ("All files", "*")],
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select ANSYS APDL .inp file", "",
+            "APDL input files (*.inp *.cdb *.dat);;All files (*)"
         )
         if path:
-            self._inp_var.set(path)
+            self._inp_edit.setText(path)
 
     def _browse_h5(self):
-        path = filedialog.askopenfilename(
-            title="Select HDF5 dataset file",
-            filetypes=[("HDF5 files", "*.h5 *.hdf5"), ("All files", "*")],
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select HDF5 dataset file", "",
+            "HDF5 files (*.h5 *.hdf5);;All files (*)"
         )
         if path:
-            self._h5_var.set(path)
+            self._h5_edit.setText(path)
 
     def _browse_outdir(self):
-        path = filedialog.askdirectory(title="Select output folder")
+        path = QFileDialog.getExistingDirectory(self, "Select output folder")
         if path:
-            self._outdir_var.set(path)
+            self._outdir_edit.setText(path)
 
     # ── Generate ──────────────────────────────────────────────────────────
 
     def _on_generate(self):
-        inp_str  = self._inp_var.get().strip()
-        h5_str   = self._h5_var.get().strip()
+        inp_str = self._inp_edit.text().strip()
+        h5_str  = self._h5_edit.text().strip()
 
         if not inp_str and not h5_str:
-            messagebox.showerror("No files selected",
-                                 "Please select at least one file (INP or H5).")
+            QMessageBox.warning(self, "No files selected",
+                                "Please select at least one file (INP or H5).")
             return
 
-        inp_path  = Path(inp_str)  if inp_str  else None
-        h5_path   = Path(h5_str)   if h5_str   else None
-        out_dir   = Path(self._outdir_var.get().strip() or "figures")
-        sample_id = self._sample_var.get()
-        view      = self._view_var.get()
-        dpi       = self._dpi_var.get()
+        inp_path = Path(inp_str) if inp_str else None
+        h5_path  = Path(h5_str)  if h5_str  else None
+        out_dir  = Path(self._outdir_edit.text().strip() or "figures")
 
-        # Validate
         if inp_path and not inp_path.is_file():
-            messagebox.showerror("File not found", f"INP not found:\n{inp_path}")
+            QMessageBox.critical(self, "File not found", f"INP not found:\n{inp_path}")
             return
         if h5_path and not h5_path.is_file():
-            messagebox.showerror("File not found", f"H5 not found:\n{h5_path}")
+            QMessageBox.critical(self, "File not found", f"H5 not found:\n{h5_path}")
             return
 
-        # Run in background thread so the GUI stays responsive
-        self._gen_btn.config(state="disabled")
-        self._pbar.start(12)
-        thread = threading.Thread(
-            target=self._generate,
-            args=(inp_path, h5_path, sample_id, view, dpi, out_dir),
-            daemon=True,
+        self._gen_btn.setEnabled(False)
+        self._pbar.setVisible(True)
+        self._status_lbl.setText("Starting…")
+
+        self._worker = Worker(
+            inp_path=inp_path,
+            h5_path=h5_path,
+            sample_id=self._sample_spin.value(),
+            view=self._view_combo.currentText(),
+            dpi=self._dpi_spin.value(),
+            out_dir=out_dir,
         )
-        thread.start()
+        self._worker.status.connect(self._status_lbl.setText)
+        self._worker.done.connect(self._on_done)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
 
-    def _generate(self, inp_path, h5_path, sample_id, view, dpi, out_dir):
-        outputs = []
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
+    def _on_done(self, outputs: list):
+        self._pbar.setVisible(False)
+        self._gen_btn.setEnabled(True)
+        self._status_lbl.setText("Done.")
+        QMessageBox.information(self, "Done",
+                                "Saved:\n" + "\n".join(outputs))
 
-            if inp_path:
-                self._set_status(f"Parsing {inp_path.name}…")
-                coords, edges, part_ids = parse_inp_for_viz(inp_path)
-                self._set_status("Rendering INP mesh…")
-                fig = plot_inp_mesh(coords, edges, part_ids, view=view, dpi=dpi)
-                out = out_dir / f"inp_mesh_{view}.png"
-                fig.savefig(out, dpi=dpi, bbox_inches="tight")
-                plt.close(fig)
-                outputs.append(str(out))
-
-            if h5_path:
-                self._set_status(f"Loading {h5_path.name} sample {sample_id}…")
-                coords, edges, z_disp, meta = load_h5_sample(h5_path, sample_id)
-                self._set_status("Rendering H5 z-disp mesh…")
-                fig = plot_h5_zdisp(coords, edges, z_disp, meta, view=view, dpi=dpi)
-                out = out_dir / f"{h5_path.stem}_zdisp_{view}.png"
-                fig.savefig(out, dpi=dpi, bbox_inches="tight")
-                plt.close(fig)
-                outputs.append(str(out))
-
-            msg = "Saved:\n" + "\n".join(outputs)
-            self._set_status("Done. " + "  |  ".join(outputs))
-            self.after(0, lambda: messagebox.showinfo("Done", msg))
-
-        except Exception as exc:
-            self._set_status(f"Error: {exc}")
-            self.after(0, lambda: messagebox.showerror("Error", str(exc)))
-
-        finally:
-            self.after(0, self._pbar.stop)
-            self.after(0, lambda: self._gen_btn.config(state="normal"))
-
-    def _set_status(self, msg: str):
-        self.after(0, lambda: self._status_var.set(msg))
+    def _on_error(self, tb: str):
+        self._pbar.setVisible(False)
+        self._gen_btn.setEnabled(True)
+        self._status_lbl.setText("Error — see details.")
+        QMessageBox.critical(self, "Error", tb)
 
 
 # ---------------------------------------------------------------------------
@@ -505,18 +560,19 @@ class App(tk.Tk):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize INP mesh and H5 dataset sample (GUI file picker).")
+        description="Visualize INP mesh and H5 dataset sample (PyQt5 GUI).")
     parser.add_argument("--inp",        type=Path, default=None,
-                        help="Pre-fill INP path (skips that file dialog)")
+                        help="Pre-fill INP path")
     parser.add_argument("--h5",         type=Path, default=None,
-                        help="Pre-fill H5 path (skips that file dialog)")
+                        help="Pre-fill H5 path")
     parser.add_argument("--sample-id",  type=int,  default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("figures"))
     parser.add_argument("--dpi",        type=int,  default=150)
     parser.add_argument("--view",       choices=["xy", "xz", "yz"], default="xy")
     args = parser.parse_args()
 
-    app = App(
+    qapp = QApplication(sys.argv)
+    win = App(
         init_inp=args.inp,
         init_h5=args.h5,
         init_sample=args.sample_id,
@@ -524,7 +580,8 @@ def main():
         init_dpi=args.dpi,
         init_outdir=args.output_dir,
     )
-    app.mainloop()
+    win.show()
+    sys.exit(qapp.exec_())
 
 
 if __name__ == "__main__":
