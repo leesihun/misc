@@ -17,7 +17,6 @@ python visualize_mesh.py --inp mesh.inp --h5 x.h5 # pre-fill both
 
 Dependencies: numpy, h5py, matplotlib, PyQt5
 """
-
 from __future__ import annotations
 
 import argparse
