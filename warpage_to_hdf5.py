@@ -122,8 +122,12 @@ ELEMENT_FACES: dict[str, list[tuple[int, ...]]] = {
         (2, 3, 7, 6), (3, 0, 4, 7),
     ],
 
-    # 6-node wedge/prism (SOLID90)
-    "SOLID90": [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
+    # 20-node thermal hex — corners 0-7 (SOLID90)
+    "SOLID90": [
+        (0, 1, 2, 3), (4, 5, 6, 7),
+        (0, 1, 5, 4), (1, 2, 6, 5),
+        (2, 3, 7, 6), (3, 0, 4, 7),
+    ],
     # Shell elements (always exterior)
     "SHELL41":  [(0, 1, 2, 3)],
     "SHELL43":  [(0, 1, 2, 3)],
@@ -139,7 +143,7 @@ CORNER_COUNT: dict[str, int] = {
     "SOLID87": 4, "SOLID92": 4, "SOLID187": 4,
     "SOLID45": 8, "SOLID185": 8,
     "SOLID95": 8, "SOLID186": 8,
-    "SOLID90": 6,
+    "SOLID90": 8,
     "SHELL41": 4, "SHELL43": 4, "SHELL63": 4,
     "SHELL93": 4, "SHELL181": 4, "SHELL281": 4,
 }
@@ -454,8 +458,11 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         mesh, "_face_tables", {}
     )
 
-    # Count face occurrences using canonical (sorted) tuple as key
+    # Count face occurrences using canonical (sorted) tuple as key.
+    # Also store the original ordered face so we can triangulate correctly.
     face_count: dict[tuple[int, ...], int] = defaultdict(int)
+    # canonical sorted tuple → original ordered tuple (first occurrence kept)
+    face_ordered: dict[tuple[int, ...], tuple[int, ...]] = {}
 
     for eid, local_faces in face_tables.items():
         global_nodes = mesh.elements[eid]
@@ -463,31 +470,35 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         is_shell = etype.upper().startswith("SHELL")
 
         for local_face in local_faces:
-            global_face = tuple(sorted(global_nodes[i] for i in local_face
-                                       if i < len(global_nodes)))
+            ordered = tuple(global_nodes[i] for i in local_face
+                            if i < len(global_nodes))
+            canonical = tuple(sorted(ordered))
+            if canonical not in face_ordered:
+                face_ordered[canonical] = ordered
             if is_shell:
                 # Shell faces are always exterior; -1 sentinel is never dropped.
-                face_count[global_face] = -1
+                face_count[canonical] = -1
             else:
                 # Don't overwrite a shell-sentinel with a solid face count.
-                if face_count.get(global_face, 0) != -1:
-                    face_count[global_face] += 1
+                if face_count.get(canonical, 0) != -1:
+                    face_count[canonical] += 1
 
     # Exterior = count == 1, or -1 (shell)
-    exterior_faces: list[tuple[int, ...]] = [
+    exterior_canonical: list[tuple[int, ...]] = [
         face for face, cnt in face_count.items() if cnt == 1 or cnt == -1
     ]
 
-    if not exterior_faces:
+    if not exterior_canonical:
         log.warning(
             "No exterior faces detected — falling back to ALL element faces. "
             "Check element types in the .inp file."
         )
-        exterior_faces = list(face_count.keys())
+        exterior_canonical = list(face_count.keys())
 
-    # Triangulate all faces
+    # Triangulate all faces using ORIGINAL vertex order (not sorted)
     tri_faces: list[tuple[int, int, int]] = []
-    for face in exterior_faces:
+    for canonical in exterior_canonical:
+        face = face_ordered[canonical]
         if len(face) == 3:
             tri_faces.append(face)  # type: ignore[arg-type]
         elif len(face) == 4:
