@@ -258,7 +258,7 @@ def plot_inp_mesh(coords: np.ndarray, edges: np.ndarray,
 
     # Scatter nodes colored by part
     sc = ax.scatter(coords[:, xi], coords[:, yi],
-                    c=part_ids, cmap="tab10", s=0.5, alpha=0.6,
+                    c=part_ids, cmap="tab10", s=2, alpha=0.8,
                     linewidths=0, rasterized=True)
 
     ax.autoscale()
@@ -293,7 +293,7 @@ def plot_h5_zdisp(coords: np.ndarray, edges: np.ndarray,
     sc = ax.scatter(coords[:, xi], coords[:, yi],
                     c=z_disp, cmap="coolwarm",
                     vmin=vmin, vmax=vmax,
-                    s=1.0, alpha=0.8, linewidths=0, rasterized=True)
+                    s=2, alpha=0.9, linewidths=0, rasterized=True)
 
     ax.autoscale()
     ax.set_aspect("equal")

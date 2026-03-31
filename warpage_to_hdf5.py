@@ -678,9 +678,13 @@ def interpolate_warpage_to_nodes(
     else:
         y_coords = np.linspace(y_min, y_max, R)  # row 0 = y_min
 
-    # Clamp node coordinates to grid extent to avoid edge issues
-    node_x = np.clip(node_xy[:, 0], x_min, x_max)
-    node_y = np.clip(node_xy[:, 1], y_min, y_max)
+    # Clamp node coordinates to grid extent to avoid edge issues.
+    # Cast to float64 first — node_xy is float32, but the grid coordinate
+    # arrays (from linspace) are float64.  float32 rounding can push boundary
+    # values slightly beyond the float64 grid bounds, causing the interpolator
+    # to return NaN (fill_value) for edge nodes.
+    node_x = np.clip(node_xy[:, 0].astype(np.float64), x_min, x_max)
+    node_y = np.clip(node_xy[:, 1].astype(np.float64), y_min, y_max)
 
     # Sort y_coords for RegularGridInterpolator (must be monotonically increasing)
     if y_coords[0] > y_coords[-1]:
