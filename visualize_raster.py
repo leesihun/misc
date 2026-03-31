@@ -6,6 +6,8 @@ Usage: python visualize_raster.py <filename> [--nodata 9999.0] [--cmap terrain]
 import sys
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from pathlib import Path
