@@ -60,6 +60,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DEBUG_LOG_PATH = Path(r"c:\Users\Lee\Desktop\Huni\misc\.cursor\debug.log")
+DEBUG_BUILD_TAG = "self-loop-fix-v2"
 
 
 def _agent_log(
@@ -914,9 +915,15 @@ def write_sample(
             "sample_idx": int(sample_idx),
             "num_edges": int(mesh_edge.shape[1]),
             "self_loop_count": self_loop_count,
+            "build_tag": DEBUG_BUILD_TAG,
+            "file": str(Path(__file__).resolve()),
         },
     )
     # #endregion
+    if self_loop_count > 0:
+        raise ValueError(
+            f"self-loop invariant violated before write_sample: {self_loop_count}"
+        )
     grp = h5file.create_group(f"data/{sample_idx}")
     grp.create_dataset("nodal_data", data=nodal_data, dtype="float32")
     grp.create_dataset("mesh_edge", data=mesh_edge, dtype="int64")
@@ -1126,7 +1133,11 @@ def main() -> None:
         hypothesis_id="H5",
         location="warpage_to_hdf5.py:main",
         message="script entry reached",
-        data={"argv_count": int(len(__import__('sys').argv))},
+        data={
+            "argv_count": int(len(__import__('sys').argv)),
+            "build_tag": DEBUG_BUILD_TAG,
+            "file": str(Path(__file__).resolve()),
+        },
     )
     # #endregion
     parser = argparse.ArgumentParser(
