@@ -530,7 +530,7 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
 
     log.info(
         "Surface topology: %d corner nodes, %d unique edges from %d exterior faces",
-        len(corner_node_ids), mesh_edge.shape[1], len(exterior_faces),
+        len(corner_node_ids), mesh_edge.shape[1], len(exterior_canonical),
     )
     return corner_node_ids, mesh_edge
 
