@@ -84,6 +84,10 @@ def _agent_log(
             fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
     except Exception:
         pass
+    try:
+        print(f"[AGENT-DEBUG] {json.dumps(payload, ensure_ascii=True)}")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ ELEMENT_FACES: dict[str, list[tuple[int, ...]]] = {
         (0, 1, 5, 4), (1, 2, 6, 5),
         (2, 3, 7, 6), (3, 0, 4, 7),
     ],
-    
+
     # 6-node wedge/prism (SOLID90)
     "SOLID90": [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
     # Shell elements (always exterior)
@@ -1101,6 +1105,15 @@ def run_pipeline(config: Config) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # #region agent log
+    _agent_log(
+        run_id="pre-fix",
+        hypothesis_id="H5",
+        location="warpage_to_hdf5.py:main",
+        message="script entry reached",
+        data={"argv_count": int(len(__import__('sys').argv))},
+    )
+    # #endregion
     parser = argparse.ArgumentParser(
         description="Convert ANSYS APDL .inp mesh + warpage .txt files → HDF5 dataset",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
