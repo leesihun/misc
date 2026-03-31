@@ -4,10 +4,13 @@ Usage: python visualize_raster.py <filename> [--nodata 9999.0] [--cmap terrain]
 """
 
 import sys
+import os
 import argparse
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg')
+# Use non-interactive Agg when there's no display (headless Linux, SSH, etc.)
+if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'):
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from pathlib import Path
