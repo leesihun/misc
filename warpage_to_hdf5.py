@@ -148,6 +148,7 @@ ELEMENT_FACES: dict[str, list[tuple[int, ...]]] = {
         (0, 1, 5, 4), (1, 2, 6, 5),
         (2, 3, 7, 6), (3, 0, 4, 7),
     ],
+    
     # 6-node wedge/prism (SOLID90)
     "SOLID90": [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (0, 2, 5, 3)],
     # Shell elements (always exterior)
