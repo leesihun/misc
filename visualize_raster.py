@@ -73,6 +73,10 @@ def visualize(filepath, nodata=9999.0, cmap='terrain', output=None, hillshade=Fa
              family='monospace',
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
 
+    if not output and matplotlib.get_backend().lower() == 'agg':
+        output = Path(filepath).stem + '.png'
+        print("No display detected — saving to file instead.")
+
     if output:
         plt.savefig(output, dpi=150, bbox_inches='tight')
         print(f"Saved to {output}")
