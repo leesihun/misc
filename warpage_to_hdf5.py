@@ -24,7 +24,6 @@ Dependencies: numpy, scipy, h5py, tqdm (optional)
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import re
@@ -58,37 +57,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-DEBUG_LOG_PATH = Path(r"c:\Users\Lee\Desktop\Huni\misc\.cursor\debug.log")
-DEBUG_BUILD_TAG = "self-loop-fix-v2"
-
-
-def _agent_log(
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-) -> None:
-    payload = {
-        "id": f"{run_id}:{hypothesis_id}:{location}",
-        "timestamp": int(__import__("time").time() * 1000),
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-    }
-    try:
-        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-    try:
-        print(f"[AGENT-DEBUG] {json.dumps(payload, ensure_ascii=True)}")
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -485,23 +453,9 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
     face_tables: dict[int, list[tuple[int, ...]]] = getattr(
         mesh, "_face_tables", {}
     )
-    # #region agent log
-    _agent_log(
-        run_id="pre-fix",
-        hypothesis_id="H1",
-        location="warpage_to_hdf5.py:extract_surface_edges:entry",
-        message="start surface edge extraction",
-        data={
-            "elements_with_faces": len(face_tables),
-            "total_elements": len(mesh.elements),
-        },
-    )
-    # #endregion
 
     # Count face occurrences using canonical (sorted) tuple as key
     face_count: dict[tuple[int, ...], int] = defaultdict(int)
-    degenerate_face_count = 0
-    degenerate_face_examples: list[tuple[int, ...]] = []
 
     for eid, local_faces in face_tables.items():
         global_nodes = mesh.elements[eid]
@@ -511,10 +465,6 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         for local_face in local_faces:
             global_face = tuple(sorted(global_nodes[i] for i in local_face
                                        if i < len(global_nodes)))
-            if len(global_face) != len(set(global_face)):
-                degenerate_face_count += 1
-                if len(degenerate_face_examples) < 5:
-                    degenerate_face_examples.append(global_face)
             if is_shell:
                 # Shell faces are always exterior; -1 sentinel is never dropped.
                 face_count[global_face] = -1
@@ -544,30 +494,6 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
             tri_faces.extend(_triangulate_quad(face))  # type: ignore[arg-type]
         # Ignore degenerate faces
 
-    degenerate_tri_count = 0
-    degenerate_tri_examples: list[tuple[int, int, int]] = []
-    for tri in tri_faces:
-        if len(set(tri)) != 3:
-            degenerate_tri_count += 1
-            if len(degenerate_tri_examples) < 5:
-                degenerate_tri_examples.append(tri)
-    # #region agent log
-    _agent_log(
-        run_id="pre-fix",
-        hypothesis_id="H2",
-        location="warpage_to_hdf5.py:extract_surface_edges:tri_faces",
-        message="degenerate face/triangle diagnostics",
-        data={
-            "degenerate_face_count": degenerate_face_count,
-            "degenerate_face_examples": degenerate_face_examples,
-            "degenerate_tri_count": degenerate_tri_count,
-            "degenerate_tri_examples": degenerate_tri_examples,
-            "exterior_faces": len(exterior_faces),
-            "tri_faces": len(tri_faces),
-        },
-    )
-    # #endregion
-
     # Collect unique corner nodes referenced in triangular faces
     corner_node_ids = np.array(sorted({n for tri in tri_faces for n in tri}),
                                dtype=np.int64)
@@ -588,38 +514,8 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
     else:
         edges_arr = np.array(sorted(edge_set), dtype=np.int64)
         non_self_mask = edges_arr[:, 0] != edges_arr[:, 1]
-        removed_self_loops = int((~non_self_mask).sum())
         edges_arr = edges_arr[non_self_mask]
         mesh_edge = edges_arr.T  # (2, E)
-        # #region agent log
-        _agent_log(
-            run_id="post-fix",
-            hypothesis_id="H6",
-            location="warpage_to_hdf5.py:extract_surface_edges:filter_self_loops",
-            message="filtered self-loop edges from mesh_edge",
-            data={
-                "removed_self_loops": removed_self_loops,
-                "remaining_edges": int(mesh_edge.shape[1]),
-            },
-        )
-        # #endregion
-
-    self_loop_mask = mesh_edge[0] == mesh_edge[1] if mesh_edge.shape[1] > 0 else np.array([], dtype=bool)
-    self_loop_count = int(self_loop_mask.sum()) if mesh_edge.shape[1] > 0 else 0
-    self_loop_examples = mesh_edge[:, self_loop_mask][:, :5].tolist() if self_loop_count > 0 else []
-    # #region agent log
-    _agent_log(
-        run_id="pre-fix",
-        hypothesis_id="H3",
-        location="warpage_to_hdf5.py:extract_surface_edges:mesh_edge",
-        message="self-loop diagnostics in generated mesh_edge",
-        data={
-            "num_edges": int(mesh_edge.shape[1]),
-            "self_loop_count": self_loop_count,
-            "self_loop_examples": self_loop_examples,
-        },
-    )
-    # #endregion
 
     log.info(
         "Surface topology: %d corner nodes, %d unique edges from %d exterior faces",
@@ -904,26 +800,6 @@ def write_sample(
     mesh_edge: np.ndarray,    # (2, E)
     filename_id: str,
 ) -> None:
-    self_loop_count = int((mesh_edge[0] == mesh_edge[1]).sum()) if mesh_edge.shape[1] > 0 else 0
-    # #region agent log
-    _agent_log(
-        run_id="pre-fix",
-        hypothesis_id="H4",
-        location="warpage_to_hdf5.py:write_sample",
-        message="self-loop diagnostics right before hdf5 write",
-        data={
-            "sample_idx": int(sample_idx),
-            "num_edges": int(mesh_edge.shape[1]),
-            "self_loop_count": self_loop_count,
-            "build_tag": DEBUG_BUILD_TAG,
-            "file": str(Path(__file__).resolve()),
-        },
-    )
-    # #endregion
-    if self_loop_count > 0:
-        raise ValueError(
-            f"self-loop invariant violated before write_sample: {self_loop_count}"
-        )
     grp = h5file.create_group(f"data/{sample_idx}")
     grp.create_dataset("nodal_data", data=nodal_data, dtype="float32")
     grp.create_dataset("mesh_edge", data=mesh_edge, dtype="int64")
@@ -1127,19 +1003,6 @@ def run_pipeline(config: Config) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # #region agent log
-    _agent_log(
-        run_id="pre-fix",
-        hypothesis_id="H5",
-        location="warpage_to_hdf5.py:main",
-        message="script entry reached",
-        data={
-            "argv_count": int(len(__import__('sys').argv)),
-            "build_tag": DEBUG_BUILD_TAG,
-            "file": str(Path(__file__).resolve()),
-        },
-    )
-    # #endregion
     parser = argparse.ArgumentParser(
         description="Convert ANSYS APDL .inp mesh + warpage .txt files → HDF5 dataset",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
