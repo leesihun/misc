@@ -586,7 +586,22 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         mesh_edge = np.zeros((2, 0), dtype=np.int64)
     else:
         edges_arr = np.array(sorted(edge_set), dtype=np.int64)
+        non_self_mask = edges_arr[:, 0] != edges_arr[:, 1]
+        removed_self_loops = int((~non_self_mask).sum())
+        edges_arr = edges_arr[non_self_mask]
         mesh_edge = edges_arr.T  # (2, E)
+        # #region agent log
+        _agent_log(
+            run_id="post-fix",
+            hypothesis_id="H6",
+            location="warpage_to_hdf5.py:extract_surface_edges:filter_self_loops",
+            message="filtered self-loop edges from mesh_edge",
+            data={
+                "removed_self_loops": removed_self_loops,
+                "remaining_edges": int(mesh_edge.shape[1]),
+            },
+        )
+        # #endregion
 
     self_loop_mask = mesh_edge[0] == mesh_edge[1] if mesh_edge.shape[1] > 0 else np.array([], dtype=bool)
     self_loop_count = int(self_loop_mask.sum()) if mesh_edge.shape[1] > 0 else 0
