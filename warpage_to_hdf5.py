@@ -699,7 +699,7 @@ def interpolate_warpage_to_nodes(
         interp = RegularGridInterpolator(
             (y_coords_sorted, x_coords),
             grid_sorted,
-            method="linear",
+            method="cubic",
             bounds_error=False,
             fill_value=np.nan,
         )
