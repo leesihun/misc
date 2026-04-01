@@ -444,6 +444,24 @@ def _triangulate_quad(quad: tuple[int, int, int, int]) -> list[tuple[int, int, i
     return [(a, b, c), (a, c, d)]
 
 
+def _collapse_face_nodes(face: tuple[int, ...]) -> tuple[int, ...]:
+    """
+    Remove repeated node IDs while preserving face winding.
+
+    ANSYS degenerated brick/shell elements encode condensed faces by repeating
+    node numbers. Collapsing duplicates turns those faces into their real
+    triangle/quad shape so topology extraction stays geometrically valid.
+    """
+    collapsed: list[int] = []
+    seen: set[int] = set()
+    for nid in face:
+        if nid in seen:
+            continue
+        collapsed.append(nid)
+        seen.add(nid)
+    return tuple(collapsed)
+
+
 def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
     """
     Extract:
@@ -468,11 +486,27 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         global_nodes = mesh.elements[eid]
         etype = mesh.elem_types[eid]
         is_shell = etype.upper().startswith("SHELL")
+        faces_seen_in_element: set[tuple[int, ...]] = set()
 
         for local_face in local_faces:
-            ordered = tuple(global_nodes[i] for i in local_face
-                            if i < len(global_nodes))
+            ordered = tuple(
+                global_nodes[i] for i in local_face if i < len(global_nodes)
+            )
+            ordered = _collapse_face_nodes(ordered)
+            if len(ordered) < 3:
+                # Condensed ANSYS faces can collapse to a line or a point.
+                continue
+            if len(ordered) not in (3, 4):
+                raise ValueError(
+                    f"Element {eid} ({etype}) produced an invalid face with "
+                    f"{len(ordered)} unique nodes: {ordered}"
+                )
+
             canonical = tuple(sorted(ordered))
+            if canonical in faces_seen_in_element:
+                continue
+            faces_seen_in_element.add(canonical)
+
             if canonical not in face_ordered:
                 face_ordered[canonical] = ordered
             if is_shell:
@@ -489,11 +523,9 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
     ]
 
     if not exterior_canonical:
-        log.warning(
-            "No exterior faces detected — falling back to ALL element faces. "
-            "Check element types in the .inp file."
+        raise ValueError(
+            "No exterior faces detected. Check element types and EBLOCK parsing."
         )
-        exterior_canonical = list(face_count.keys())
 
     # Triangulate all faces using ORIGINAL vertex order (not sorted)
     tri_faces: list[tuple[int, int, int]] = []
@@ -503,7 +535,8 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
             tri_faces.append(face)  # type: ignore[arg-type]
         elif len(face) == 4:
             tri_faces.extend(_triangulate_quad(face))  # type: ignore[arg-type]
-        # Ignore degenerate faces
+        else:
+            raise ValueError(f"Unsupported exterior face arity: {len(face)}")
 
     # Collect unique corner nodes referenced in triangular faces
     corner_node_ids = np.array(sorted({n for tri in tri_faces for n in tri}),
@@ -524,8 +557,12 @@ def extract_surface_edges(mesh: AbaqusMesh) -> tuple[np.ndarray, np.ndarray]:
         mesh_edge = np.zeros((2, 0), dtype=np.int64)
     else:
         edges_arr = np.array(sorted(edge_set), dtype=np.int64)
-        non_self_mask = edges_arr[:, 0] != edges_arr[:, 1]
-        edges_arr = edges_arr[non_self_mask]
+        self_loop_mask = edges_arr[:, 0] == edges_arr[:, 1]
+        if self_loop_mask.any():
+            examples = edges_arr[self_loop_mask][:5].tolist()
+            raise ValueError(
+                f"Self-loop edges generated from exterior faces: {examples}"
+            )
         mesh_edge = edges_arr.T  # (2, E)
 
     log.info(
@@ -637,7 +674,7 @@ def _fill_nan_nearest(grid: np.ndarray) -> np.ndarray:
     if not nan_mask.any():
         return grid
     if nan_mask.all():
-        return np.zeros_like(grid)
+        raise ValueError("Warpage grid contains only void cells.")
     # distance_transform_edt with return_indices gives, for every True cell
     # in the mask, the row/col of the nearest False cell.
     _, indices = distance_transform_edt(nan_mask, return_distances=True,
@@ -659,17 +696,14 @@ def interpolate_warpage_to_nodes(
     Returns float32 array (N,) of interpolated z_disp values.
 
     Strategy:
-      1. Fill NaN (void) gaps in the grid with nearest-valid-cell values
-         using distance_transform_edt (O(R*C)).
-      2. Single-pass RegularGridInterpolator on the gap-filled grid.
+      1. Bilinearly interpolate the original grid.
+      2. Only for query points that touch void cells and therefore evaluate
+         to NaN, fall back to the nearest valid raster cell.
 
     AXIS ORDER: RegularGridInterpolator expects (y, x) because the grid
     has shape (rows, cols) = (y_axis, x_axis).
     """
     R, C = grid.shape
-
-    # Fill void gaps before interpolation — avoids slow KDTree fallback
-    grid_filled = _fill_nan_nearest(grid)
 
     # Build physical coordinate arrays for each axis
     x_coords = np.linspace(x_min, x_max, C)
@@ -689,30 +723,44 @@ def interpolate_warpage_to_nodes(
     # Sort y_coords for RegularGridInterpolator (must be monotonically increasing)
     if y_coords[0] > y_coords[-1]:
         y_coords_sorted = y_coords[::-1]
-        grid_sorted = grid_filled[::-1, :]
+        grid_sorted = grid[::-1, :]
     else:
         y_coords_sorted = y_coords
-        grid_sorted = grid_filled
+        grid_sorted = grid
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        interp = RegularGridInterpolator(
+        bilinear_interp = RegularGridInterpolator(
             (y_coords_sorted, x_coords),
             grid_sorted,
-            method="cubic",
+            method="linear",
             bounds_error=False,
             fill_value=np.nan,
         )
     query_pts = np.column_stack([node_y, node_x])  # (N, 2) in (y, x) order
-    z_disp = interp(query_pts).astype(np.float32)
+    z_disp = bilinear_interp(query_pts)
 
-    # Safety: if any node still ended up NaN (should not happen with filled grid)
-    nan_count = np.isnan(z_disp).sum()
+    nan_mask = np.isnan(z_disp)
+    if nan_mask.any():
+        grid_nearest = _fill_nan_nearest(grid_sorted)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            nearest_interp = RegularGridInterpolator(
+                (y_coords_sorted, x_coords),
+                grid_nearest,
+                method="nearest",
+                bounds_error=False,
+                fill_value=np.nan,
+            )
+        z_disp[nan_mask] = nearest_interp(query_pts[nan_mask])
+
+    nan_count = int(np.isnan(z_disp).sum())
     if nan_count > 0:
-        log.warning("  %d nodes still NaN after interpolation — set to 0.0", nan_count)
-        z_disp = np.nan_to_num(z_disp, nan=0.0)
+        raise ValueError(
+            f"{nan_count} nodes could not be interpolated from the warpage grid."
+        )
 
-    return z_disp
+    return z_disp.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -789,16 +837,11 @@ def _worker(txt_path_str: str) -> tuple[np.ndarray, str]:
 
     txt_path = Path(txt_path_str)
 
-    try:
-        grid = read_warpage_grid(txt_path, void_threshold, unit_scale)
-    except Exception as exc:
-        log.error("Failed to read %s: %s", txt_path.name, exc)
-        z_disp = np.zeros(node_coords.shape[0], dtype=np.float32)
-    else:
-        z_disp = interpolate_warpage_to_nodes(
-            grid, x_min, x_max, y_min, y_max,
-            node_coords[:, :2], flip_y,
-        )
+    grid = read_warpage_grid(txt_path, void_threshold, unit_scale)
+    z_disp = interpolate_warpage_to_nodes(
+        grid, x_min, x_max, y_min, y_max,
+        node_coords[:, :2], flip_y,
+    )
 
     nodal_data = build_nodal_data(node_coords, z_disp, part_nos)
     return nodal_data, txt_path.stem
@@ -970,25 +1013,20 @@ def run_pipeline(config: Config) -> None:
             pool.submit(_worker, path_str): idx
             for idx, path_str in enumerate(txt_paths_str)
         }
+        worker_errors: list[str] = []
         for future in _progress(as_completed(futures), total=len(txt_files),
                                 desc="Processing samples"):
             orig_idx = futures[future]
             try:
                 results[orig_idx] = future.result()
             except Exception as exc:
-                log.error(
-                    "Worker failed for %s: %s",
-                    txt_files[orig_idx].name, exc,
-                )
-                # Fill with zeros so indexing stays contiguous
-                results[orig_idx] = (
-                    build_nodal_data(
-                        node_coords,
-                        np.zeros(node_coords.shape[0], dtype=np.float32),
-                        part_nos,
-                    ),
-                    txt_files[orig_idx].stem,
-                )
+                worker_errors.append(f"{txt_files[orig_idx].name}: {exc}")
+
+        if worker_errors:
+            raise RuntimeError(
+                "Failed to process warpage samples:\n"
+                + "\n".join(worker_errors[:20])
+            )
 
     # 7. Write HDF5 serially (h5py is not multiprocess-safe)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
