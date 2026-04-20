@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 INTERVAL=600  # 10 minutes in seconds
-OUTPUT="gpu_usage_$(date +%Y%m%d_%H%M%S).csv"
+OUTPUT="gpu_usage.csv"
 
 echo "timestamp,gpu_index,gpu_name,vram_used_mb,vram_total_mb,vram_used_pct,gpu_util_pct" > "$OUTPUT"
 
