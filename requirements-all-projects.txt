@@ -1,0 +1,270 @@
+# ============================================================
+# requirements-all-projects.txt
+#   Consolidated Python dependencies for ALL Huni projects.
+#   Sources: SimulGenVAE, SimulGenVAE2D, PEMTRON_warpage,
+#            temp/LLM_API, LLM_API_fast sub-bots, Gmail_exporter.
+#
+#   Packages already handled in dedicated wheel dirs
+#   (llm_api, meshgraphnets, vllm, jupyter, llamacpp) are
+#   intentionally kept here too so each venv is self-contained.
+#
+#   Excluded:
+#     - pyreadline3      (Windows-only)
+#     - langchain-classic (not on PyPI)
+#     - xlwt             (Python 2, deprecated)
+#     - aider-chat       (dev tool, huge, not needed on server)
+#     - llama-cpp-python (needs CUDA compilation; handled via source)
+#     - pyinstaller      (build tool, not needed on server)
+# ============================================================
+
+# ── Web framework ─────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+starlette
+sse-starlette
+python-multipart
+python-dotenv
+Werkzeug
+Flask
+Flask-CORS
+
+# ── HTTP / networking ──────────────────────────────────────────
+httpx
+httpx-sse
+httpcore
+requests
+requests-oauthlib
+requests-toolbelt
+aiohttp
+aiofiles
+aiohappyeyeballs
+aiosignal
+websockets
+websocket-client
+watchfiles
+h11
+
+# ── Auth / security ────────────────────────────────────────────
+passlib[bcrypt]
+python-jose[cryptography]
+cryptography
+cffi
+ecdsa
+pycparser
+pyasn1
+pyasn1_modules
+rsa
+oauthlib
+
+# ── Data science / ML core ────────────────────────────────────
+numpy
+scipy
+pandas
+scikit-learn
+statsmodels
+patsy
+sympy
+networkx
+numexpr
+narwhals
+
+# ── PyTorch ecosystem (torch itself from TORCH_INDEX) ─────────
+torchinfo
+torchvision
+tensorboard
+pytorch-warmup
+scikit-image
+
+# ── Audio / signal processing (SimulGenVAE) ───────────────────
+librosa
+audiomentations
+soxr
+audioread
+torchsummaryX
+natsort
+
+# ── Computer vision ────────────────────────────────────────────
+opencv-python
+imageio
+Pillow
+
+# ── NLP / LLM ecosystem ───────────────────────────────────────
+transformers
+tokenizers
+safetensors
+sentence-transformers
+tiktoken
+huggingface-hub
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-ollama
+langgraph
+langgraph-checkpoint
+langgraph-prebuilt
+langgraph-sdk
+langsmith
+ollama
+rank-bm25
+
+# ── Vector search / embeddings ────────────────────────────────
+faiss-cpu
+onnxruntime
+
+# ── RAG / document parsing ────────────────────────────────────
+PyMuPDF
+pypdf
+PyPDF2
+pypdfium2
+pdfminer.six
+pdfplumber
+python-docx
+python-pptx
+openpyxl
+xlrd
+lxml
+beautifulsoup4
+soupsieve
+xarray
+tables
+netCDF4
+pyarrow
+h5py
+
+# ── Serialization / data interchange ─────────────────────────
+orjson
+ormsgpack
+msgpack
+xxhash
+zstandard
+blosc2
+mmh3
+PyYAML
+jsonschema
+jsonschema-specifications
+referencing
+rpds-py
+jsonpatch
+jsonpointer
+marshmallow
+dataclasses-json
+mypy_extensions
+
+# ── Plotting / visualization ──────────────────────────────────
+matplotlib
+plotly
+seaborn
+kaleido
+
+# ── Reporting / PDF generation ────────────────────────────────
+reportlab
+
+# ── Compute / profiling ───────────────────────────────────────
+py-cpuinfo
+psutil
+
+# ── gRPC / protobuf / OpenTelemetry ──────────────────────────
+grpcio
+protobuf
+googleapis-common-protos
+opentelemetry-api
+opentelemetry-exporter-otlp-proto-common
+opentelemetry-proto
+opentelemetry-semantic-conventions
+
+# ── Kubernetes Python client (healer agent) ───────────────────
+kubernetes
+
+# ── Google APIs (Gmail exporter) ─────────────────────────────
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+cachetools
+
+# ── Web search ────────────────────────────────────────────────
+tavily-python
+
+# ── Jupyter / kernel ──────────────────────────────────────────
+jupyter_client
+ipykernel
+jupyterlab
+notebook
+ipywidgets
+jupyter-server
+jupyter-collaboration
+
+# ── Dev / code quality ────────────────────────────────────────
+black
+ruff
+flake8
+mypy
+pytest
+pytest-cov
+ipdb
+
+# ── Utilities ─────────────────────────────────────────────────
+tqdm
+rich
+click
+typer
+colorama
+coloredlogs
+humanfriendly
+natsort
+tenacity
+backoff
+anyio
+sniffio
+packaging
+platformdirs
+importlib_metadata
+importlib_resources
+fsspec
+filelock
+distro
+schedule
+six
+python-dateutil
+tzdata
+pyperclip
+regex
+overrides
+
+# ── SSH / remote transfer (PEMTRON data_autotransfer) ─────────
+paramiko
+smbprotocol
+
+# ── GUI (PEMTRON masking tool) ────────────────────────────────
+PyQt5
+
+# ── Database ──────────────────────────────────────────────────
+SQLAlchemy
+greenlet
+PyPika
+
+# ── Text / NLP utilities ──────────────────────────────────────
+nltk
+textblob
+tiktoken
+posthog
+
+# ── Misc ML support ───────────────────────────────────────────
+threadpoolctl
+joblib
+flatbuffers
+durationpy
+Cerberus
+propcache
+frozenlist
+multidict
+yarl
+chardet
+pip-system-certs
+ndindex
+pybase64
+pyproject_hooks
+build

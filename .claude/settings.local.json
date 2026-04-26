@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash -n c:/Users/Lee/Desktop/Huni/misc/gather-all.sh)",
+      "Bash(bash -n c:/Users/Lee/Desktop/Huni/misc/install-all.sh)",
+      "Read(//proc/**)",
+      "PowerShell(wsl --list --verbose 2>&1)",
+      "PowerShell(head -10)",
+      "PowerShell(wsl -e bash -c \"echo 'WSL ready'; whoami; uname -r; echo HOME=$HOME\")",
+      "PowerShell(wsl -e bash -c \"nohup bash -c 'HUNI_DIR=/mnt/c/Users/Lee/Desktop/Huni INCLUDE_K3S=0 bash /mnt/c/Users/Lee/Desktop/Huni/misc/gather-all.sh > /tmp/gather-all.log 2>&1; echo EXIT_CODE=\\\\$? >> /tmp/gather-all.log' &\")",
+      "PowerShell(wsl -e bash -c \"cat /tmp/gather-all.log 2>/dev/null | tail -20; echo '---'; ps aux 2>/dev/null | grep gather\")",
+      "PowerShell(wsl -e bash -c \"ls /tmp/gather-all.log 2>/dev/null && echo EXISTS || echo MISSING\")",
+      "PowerShell(wsl -e bash /tmp/run-gather.sh)",
+      "PowerShell(wsl -e bash -c \"tail -30 /tmp/gather-all.log 2>/dev/null || echo 'Log not started yet'\")",
+      "PowerShell(wsl -e bash -c \"tail -50 /tmp/gather-all.log 2>/dev/null\")",
+      "PowerShell(wsl -e bash -c \"tail -80 /tmp/gather-all.log 2>/dev/null; echo '=== PROCESS CHECK ==='; ps aux 2>/dev/null | grep -E 'gather|bash|apt|pip' | grep -v grep\")",
+      "PowerShell(wsl -e bash -c \"ls -la /proc/22355/fd 2>/dev/null | head -20; cat /proc/22355/status 2>/dev/null | grep -E 'State|VmRSS|Name'\")",
+      "PowerShell(wsl -e bash -c \"ls /proc/22355/net/tcp 2>/dev/null; cat /proc/22355/net/sockstat 2>/dev/null | head -5; find /proc/22355 -name 'fd' -type d 2>/dev/null | xargs ls -la 2>/dev/null | grep socket | wc -l\")",
+      "PowerShell(wsl -e bash -c \"kill -9 22338 22341 22355 2>/dev/null; sleep 2; ps aux 2>/dev/null | grep -E 'gather|run-gather' | grep -v grep; echo 'Killed'\")",
+      "Bash(curl -s \"https://api.github.com/repos/sst/opencode/releases/latest\")",
+      "Bash(curl -sL \"https://api.github.com/repositories/975734319/releases/latest\")",
+      "Bash(curl -sL \"https://nodejs.org/dist/latest-v22.x/\")",
+      "WebFetch(domain:docs.nvidia.com)",
+      "WebFetch(domain:docs.vllm.ai)"
+    ]
+  }
+}
