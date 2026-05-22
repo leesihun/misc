@@ -2,7 +2,7 @@
 
 Two independent airgap bundles, run in sequence on the target.
 
-**Bundle 1 ??NVIDIA stack** (R580 LTS driver + CUDA 13.0 + FM + NVLSM + NCCL + DCGM)
+**Bundle 1 ??NVIDIA stack** (R580 LTS driver + CUDA 13.0 + FM + NVLSM + optional host NCCL + DCGM)
 - `gather-nvidia.sh` (WSL ??`nvidia-airgap-bundle-ubuntu24.04.bin`)
 - `pre-install-nvidia.sh` (target preflight)
 - `install-nvidia.sh` (target install ??**reboot required after**)
@@ -31,6 +31,35 @@ All paths are on the target machine unless noted.
 
 ---
 
+## Airgap mapping vs upstream
+
+The target machine is airgapped. Every install-time fetch the upstream flows
+assume is replaced with a bundled equivalent. **No script in this repo may
+fetch from the internet on the target.**
+
+| Upstream (online flow) | This repo (airgap) |
+|------------------------|--------------------|
+| `apt update` against `developer.download.nvidia.com` | `file:///var/tmp/airgap-nvidia-debs/` registered as `/etc/apt/sources.list.d/00-nvidia-bundle.list`; package versions resolved against the bundle's `meta/target.env` |
+| `apt update` against `archive.ubuntu.com` | `file:///var/tmp/airgap-bundle-debs/` registered as `/etc/apt/sources.list.d/00-bundle.list` |
+| `pip install … --index-url https://download.pytorch.org/whl/cu130` | `pip install --no-index --find-links="$BUNDLE_DIR/wheels/inference"` (or `wheels/training` / `wheels/jupyter` / `wheels/llamacpp`) |
+| `pip install … --find-links https://data.pyg.org/whl/torch-2.11.0+cu130.html` | Same wheelhouse — PyG wheels are pre-downloaded into `wheels/training/` |
+| `git clone https://github.com/ggml-org/llama.cpp` | `tar -xzf $BUNDLE_DIR/src/llama.cpp.tar.gz` — source archived at gather time, commit pinned in `meta/target.env` (`BUNDLE_LLAMA_COMMIT`) |
+| `curl https://developer.download.nvidia.com/.../cuda-keyring_1.1-1_all.deb` | Pinned in the NVIDIA bundle; install-nvidia.sh registers the file:// repo, never reaches the internet |
+| `pip install vllm` (PyPI) | Pre-downloaded into `wheels/inference/`; `INSTALL_VLLM=1` opt-in only |
+| `nodejs.org` LTS tarball | Pre-staged at `$BUNDLE_DIR/apps/nodejs.tar.xz` |
+| `releases.mozilla.org` Firefox tarball | Pre-staged at `$BUNDLE_DIR/apps/firefox.tar.xz` |
+| `update.code.visualstudio.com/.../linux-deb-x64/stable` | Pre-staged at `$BUNDLE_DIR/apps/vscode.deb` |
+| `dl.google.com/.../google-chrome-stable_current_amd64.deb` | Pre-staged at `$BUNDLE_DIR/apps/chrome.deb` |
+| `github.com/oven-sh/bun/releases/...` zip | Pre-staged at `$BUNDLE_DIR/apps/bun-linux-x64.zip` |
+| `github.com/sst/opencode/releases/...` tar.gz | Pre-staged binary at `$BUNDLE_DIR/apps/opencode` |
+
+Gather scripts (`gather-nvidia.sh`, `gather-all.sh`) run on an internet-connected
+WSL Ubuntu 24.04 host. They fetch everything above into the bundle. The
+gather phase is the ONLY internet-dependent step; the target phase is fully
+offline.
+
+---
+
 ## 0. NVIDIA stack bundle (R580 LTS + CUDA 13.0)
 
 ### 0.1 APT packages (from NVIDIA CUDA repo `ubuntu2404/x86_64`)
@@ -42,25 +71,28 @@ All paths are on the target machine unless noted.
 - `cuda-drivers-580` ??metapackage that ties FM to driver version
 
 **NVSwitch / NVLink5** (B300 = 4th-gen NVSwitch):
-- `cuda-drivers-fabricmanager-580`
+- `cuda-drivers-fabricmanager-580` (only when NVIDIA repo exposes the meta — auto-skipped on R580)
 - `nvidia-fabricmanager-580`
 - `nvlsm` ??NVLink Subnet Manager (runs as child of nvidia-fabricmanager)
 - `libnvidia-nscq-580`
-- `libnvsdm-580`
 
 **Persistence + RDMA**:
-- `nv-persistence-mode`
-- `nvidia-peermem-loader` ??requires DOCA-OFED already installed
+- `nvidia-persistenced` (rides transitively with `nvidia-driver-580-open`; no separate apt name)
+- `nvidia-peermem.ko` (ships in the open driver package; autoloaded via `/etc/modules-load.d/nvidia-peermem.conf`)
 
-**CUDA toolkit 13.0** (explicit list ??avoids `cuda` / `cuda-13-0` metapkg that drags driver in again):
-- `cuda-toolkit-13-0`
-- `cuda-cudart-13-0`
-- `cuda-cudart-dev-13-0`
-- `cuda-compat-13-0`
+**CUDA toolkit 13.0 — MINIMAL subset** (we DELIBERATELY avoid `cuda-toolkit-13-0` — that ~3 GB metapackage pulls cuFFT/cuSPARSE/NPP/nvJPEG which PyTorch/vLLM venvs already ship via pip nvidia-*-cu13 wheels; installing the system metapackage causes ABI skew):
+- `cuda-nvcc-13-0` — nvcc compiler
+- `cuda-cudart-13-0` — `libcudart.so` runtime
+- `cuda-cudart-dev-13-0` — headers + static lib
+- `cuda-cccl-13-0` — Thrust / CUB headers (llama.cpp build needs this)
+- `libcublas-13-0` — `libcublas.so` + `libcublasLt.so`
+- `libcublas-dev-13-0` — cuBLAS headers
+- `libnvjitlink-13-0` — JIT-link (cuBLASLt dlopens this)
+- `cuda-compat-13-0` — forward-compat shim, optional but cheap
 
-**NCCL** (strict `+cuda13.0` suffix ??guards against accidental `+cuda13.2`):
-- `libnccl2`  (e.g. `2.28.9-1+cuda13.0`, resolved at gather time)
-- `libnccl-dev` (matching version)
+**Host NCCL** (optional; strict `+cuda13.0` suffix ??guards against accidental `+cuda13.2`):
+- `libnccl2`  (e.g. `2.28.9-1+cuda13.0`, resolved at gather time only when `SKIP_NCCL=0`)
+- `libnccl-dev` (matching version; only when `SKIP_NCCL=0`)
 
 **Monitoring**:
 - `datacenter-gpu-manager-4-cuda13` ??DCGM 4.3.x+
@@ -73,9 +105,11 @@ Plus the full transitive .deb closure via `apt-rdepends`. Bundle size: **~2?? GB
 |------|------|
 | `/var/tmp/airgap-nvidia-debs/` | Local `file://` apt repo (NVIDIA bundle's debs/) |
 | `/etc/apt/sources.list.d/00-nvidia-bundle.list` | `deb [trusted=yes] file:///var/tmp/airgap-nvidia-debs ./` |
-| `/etc/apt/preferences.d/99-nvidia-prefer-bundle` | Priority 1001 for nvidia-*/cuda-*/libnvidia-*/libnvsdm-*/libnccl*/nvlsm/nv-persistence-mode/datacenter-gpu-manager-* |
-| `apt-mark hold` | Applied to every installed nvidia-*/cuda-*/libnvidia-*/libnvsdm-*/libnccl*/nvlsm/nv-persistence-mode/nvidia-peermem-loader/datacenter-gpu-manager-* package |
-| `/var/lib/install-nvidia/nvidia-held.txt` | Manifest of held packages |
+| `/etc/apt/preferences.d/99-nvidia-prefer-bundle` | Priority 1001 for `nvidia-*` / `cuda-*` / `libnvidia-*` / `libnvjit*` / `libnvfat*` / `libnccl*` / `nvlsm` / `datacenter-gpu-manager-*` (libnccl matters only for explicit `SKIP_NCCL=0`) |
+| `apt-mark hold` | Applied to every installed `nvidia-driver-*`, `nvidia-fabricmanager-*`, `nvidia-persistenced`, `libnvidia-*`, `cuda-drivers`, `cuda-nvcc-*`, `cuda-cudart-*`, `cuda-cccl-*`, `cuda-compat-*`, `libcublas-*`, `libnvjitlink-*`, `libnccl*`, `nvlsm`, `nvidia-modprobe`, `datacenter-gpu-manager-*` package. Userland installer (install-all.d/03-apt-repo.sh) only adds holds on the system runtime libs (libstdc++6/libgcc-s1/libgomp1/libc6). |
+| `/var/lib/install-nvidia/nvidia-held.txt` | Manifest of NVIDIA packages held |
+| `/etc/profile.d/cuda.sh` | nvcc on PATH for login shells (written by install-nvidia.sh step 5b; does NOT modify LD_LIBRARY_PATH on purpose) |
+| `/etc/ld.so.conf.d/cuda-system.conf` | `/usr/local/cuda/lib64` added to ld.so cache so non-RPATH binaries (llama-cli / llama-server) find `libcudart.so.13` (written by install-nvidia.sh step 5b; searched AFTER RUNPATH so PyTorch/vLLM venv-bundled CUDA libs still win) |
 
 ### 0.3 systemd units enabled
 
@@ -110,6 +144,45 @@ install-nvidia.sh exits asking for a reboot. `nvidia.ko` loads on next boot; FM/
 - **NVSwitch / NIC firmware** ??vendor
 - **GPU mode** (MIG / ECC / clocks / power limit / compute mode) ??operator policy (see Section B.1)
 - **Userland** ??separate install-all.sh
+
+---
+
+## 0.8 Userland install steps (`install-all.d/`)
+
+`install-all.sh` is now a thin launcher (~250 lines). The real work lives in
+`install-all.d/NN-name.sh` — 17 standalone, directly-runnable step scripts
+plus one shared helpers file. Each step writes its own log
+(`/var/log/install-all/<RUN_ID>/NN-name.log`) and status marker
+(`/var/lib/install-all/steps/NN-name.{ok,failed}`).
+
+| # | Script | Concern |
+|---|--------|---------|
+| 00 | `install-all.d/00-common.sh` | Sourced by every step. Helpers (log/warn/die/step), step lifecycle (`init_step`/`mark_step_ok`), traps, apt helpers (`_apt_install`, `_pkg_satisfied`, `_normalize_pkg_name` t64 mapping), wheelhouse helpers, `_as_user` (drop to SUDO_USER), bundle metadata sourcing (incl. nvidia bundle's `meta/target.env` → CUDA_MAJOR/MINOR), env-knob defaults. Not executed. |
+| 01 | `01-preflight.sh` | Re-exec under sudo, bundle locate + SHA256 + extract, variant guard (`BUNDLE_VARIANT=prepped`), runs `pre-install-check.sh`. |
+| 02 | `02-scratch.sh` | `$SCRATCH_ROOT` directory creation + chown. |
+| 03 | `03-apt-repo.sh` | System-lib holds, local file:// apt repo, `apt-get update`. **No NVIDIA pin** (install-nvidia.sh's pin already covers nvidia packages and points at the bundle); **no nvidia-* hold** (install-nvidia.sh already holds them). |
+| 04 | `04-apt-plan.sh` | `apt -s` dry-run; refuses if a kernel/firmware/microcode upgrade is detected (unless `FORCE=1`); writes proposed/triggers files for step 05. |
+| 05 | `05-reboot-trigger-packages.sh` | If step 04 found libc6/systemd/dbus upgrades, installs them only, writes `/var/lib/install-all-prepped/stage1.done`, exits 75 (launcher renders reboot prompt). |
+| 06 | `06-apt-userland.sh` | Toolchain, `python${PYTHON_VER}-venv/dev`, needrestart, CLI tools, GUI runtime libs, scientific libs (incl. libssl-dev for llama.cpp OpenSSL HTTP), optional xfce4+xrdp+lightdm. |
+| 07 | `07-app-debs.sh` | VS Code + Chrome `.deb` install via `apt install ./`, AppArmor reload, `kernel.apparmor_restrict_unprivileged_userns=0` sysctl. |
+| 08 | `08-tarball-apps.sh` | Firefox, Node.js, Bun, Opencode (tarballs). `needrestart -r a`. |
+| 09 | `09-desktop-xrdp.sh` | xrdp startwm → `startxfce4`, polkit shutdown rules, UFW 3389. Honors `INSTALL_DESKTOP`. |
+| 10 | `10-wheelhouse-manifests.sh` | `generate_wheelhouse_requirements` — emits per-wheelhouse `requirements.txt`. |
+| 11 | `11-venv-inference.sh` | Inference venv at `$INFERENCE_PREFIX/venv` — torch (cu130), optional vLLM, FastAPI + RAG stack. Honors `INSTALL_INFERENCE`, `INSTALL_VLLM`. Pre-warms sm_103 PTX-JIT cache. |
+| 12 | `12-venv-training.sh` | Training venv — torch (cu130), torch-geometric + extensions (pyg_lib, scatter, sparse, cluster; torch_spline_conv unavailable on cu130), SciPy stack. |
+| 13 | `13-venv-jupyter.sh` | JupyterLab venv, ipykernel registration, `~/start-jupyter.sh` launcher. |
+| 14 | `14-llamacpp-build.sh` | llama.cpp build. cmake flags: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. Drops deprecated `LLAMA_CURL`. NCCL link-time auto-disabled because `SKIP_NCCL=1` is the install-nvidia.sh default (intentional). |
+| 15 | `15-system-tuning.sh` | sysctl (vm.overcommit, swappiness, max_map_count, net buffers), THP=madvise via `disable-thp-defrag.service`, pam_limits. Refuses to write `/etc/systemd/system.conf.d/*` (see notes in step 15 about unit mismatch). |
+| 16 | `16-operational-tooling.sh` | `/usr/local/bin/gpu-health-check`, `/usr/local/bin/llama-server-multigpu`, `/usr/local/bin/llama-model-preload`, `/etc/systemd/system/llama-server@.service`, `/etc/llama-server/example.env`. |
+| 17 | `17-final-status.sh` | Clears resume marker, `chown -R $SCRATCH_ROOT`, prints final banner. (Launcher also prints aggregate summary across the run.) |
+
+The launcher (`install-all.sh`) supports:
+- `--list` — show step status for the current `RUN_ID`
+- `--run NN` (or `--run NN-name`) — run one step, clearing its marker first
+- `--from NN` — run steps NN..17
+- `--rerun NN[,NN]` — delete `.ok` for these steps, then run them in default order
+- `--force` — ignore all `.ok` markers
+- `--skip-preflight` — skip step 01's `pre-install-check.sh`
 
 ---
 
@@ -407,10 +480,12 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 ### APT
 | Path | What |
 |------|------|
-| `/etc/apt/preferences.d/99-nvidia-prefer-origin` | Pins nvidia-*/cuda-*/libnvidia-* to `origin "developer.download.nvidia.com"` priority 1001 |
-| `/etc/apt/sources.list.d/00-bundle.list` | `deb [trusted=yes] file:///var/tmp/airgap-bundle-debs ./` |
+| `/etc/apt/sources.list.d/00-bundle.list` | `deb [trusted=yes] file:///var/tmp/airgap-bundle-debs ./` (written by step 03) |
 | `/var/tmp/airgap-bundle-debs/` | Local file:// apt repo (copy of bundle's debs/). Uses bundled `Packages` if `dpkg-scanpackages` is not installed yet. |
-| `apt-mark hold` | Applied to every installed nvidia-*/cuda-*/libnvidia-*/libcudart*/libcublas*/libcudnn*/libcurand*/libcufft*/libcusparse*/libcusolver*/libnpp* package; holds remain in place after install. |
+| `apt-mark hold` | Step 03 adds holds ONLY on system runtime libs (`libstdc++6`, `libgcc-s1`, `libgomp1`, `libc6`) to prevent the userland install from downgrading the CUDA runtime's link target. The nvidia-*/cuda-*/libnvidia-* holds are owned by install-nvidia.sh; this script no longer duplicates them. |
+| `/var/lib/install-all/system-libs-held.txt` | Audit list of system libs held by step 03 |
+
+(The previous `/etc/apt/preferences.d/99-nvidia-prefer-origin` pin to `developer.download.nvidia.com` was removed: that origin is unreachable on airgap, and install-nvidia.sh's `99-nvidia-prefer-bundle` file:// pin already covers the nvidia/cuda package set.)
 
 ### Kernel / sysctl
 | Path | Settings |
@@ -421,8 +496,7 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 ### System limits
 | Path | Settings |
 |------|----------|
-| `/etc/security/limits.d/99-llm-multigpu.conf` | `nofile=1048576`, `nproc=524288`, `memlock=unlimited`, `stack=65536` (both soft + hard, for `*`) |
-| `/etc/systemd/system.conf.d/99-llm-multigpu.conf` | Mirrors above into systemd `DefaultLimit*` (services started outside PAM) |
+| `/etc/security/limits.d/99-llm-multigpu.conf` | `nofile=1048576`, `nproc=524288`, `memlock=unlimited`, `stack=65536` (both soft + hard, for `*`). pam_limits-only — step 15 will REMOVE any stale `/etc/systemd/system.conf.d/99-llm-multigpu.conf` from prior installs because DefaultLimit* there is unit-mismatched (bytes vs KB on LimitSTACK/MEMLOCK) and crashes systemd services. Per-service Limit*= belongs in unit files; see `llama-server@.service`. |
 
 ### Desktop (if INSTALL_DESKTOP=1)
 | Path | What |
@@ -441,17 +515,23 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | `/etc/llama-server/` | Directory (per-instance env files go here) |
 | `/etc/llama-server/example.env` | Template: `MODEL`, `HOST`, `PORT`, `NGL`, `CTX`, `EXTRA` |
 
-### State (transient)
+### State (transient + persistent)
 | Path | What |
 |------|------|
-| `/var/lib/install-all-prepped/stage1.done` | Resume marker, only present during conditional 2-stage reboot path. Deleted at end of install. |
-| `/var/lib/install-all-prepped/nvidia-held.txt` | Audit list of NVIDIA packages held by install-all.sh; not used to unhold automatically |
+| `/var/lib/install-all/steps/NN-name.ok` | Step success marker. Written by `mark_step_ok` in each step script; the launcher (`install-all.sh`) consults these to skip already-completed steps on re-run. |
+| `/var/lib/install-all/steps/NN-name.failed` | Step failure marker. Written by the EXIT trap in `00-common.sh` when a step exits non-zero. Step 17 / launcher report the first failed step by name. |
+| `/var/lib/install-all/apt-requested.txt` | Step 04 dumps the apt-get install list (after t64 normalization) |
+| `/var/lib/install-all/apt-proposed.txt` | Step 04 dumps every `(Inst|Conf)` line from `apt -s` simulation |
+| `/var/lib/install-all/apt-reboot-triggers.txt` | Step 04 dumps reboot-triggering packages (libc6/systemd/dbus, +DKMS-danger if FORCE=1); step 05 reads this to decide whether to run Stage 1 |
+| `/var/lib/install-all/system-libs-held.txt` | Step 03 audit list of system runtime libs held (libstdc++6/libgcc-s1/libgomp1/libc6) |
+| `/var/lib/install-all/run-<RUN_ID>/warnings.log` | Per-run accumulator of step `warn` calls |
+| `/var/lib/install-all/run-<RUN_ID>/errors.log` | Per-run accumulator of step `die` / ERR-trap calls |
+| `/var/lib/install-all-prepped/stage1.done` | Resume marker, only present during conditional 2-stage reboot path. Steps 03/04/05 short-circuit when present; deleted by step 17 at end of install. |
 
 ### Logs (transient ??kept for debug)
 | Path | What |
 |------|------|
-| `$SCRIPT_DIR/install-all-<timestamp>.log` | Full stdout/stderr transcript of the install |
-| `$SCRIPT_DIR/install-diagnostics-<timestamp>.log` | End-of-run diagnostics summary with overall status, causes, warnings, errors, and follow-up commands |
+| `/var/log/install-all/<RUN_ID>/NN-name.log` | Per-step transcript (stdout+stderr via tee in `init_step`). One subdirectory per launcher invocation. |
 | `/tmp/preinstall-report-<timestamp>.log` | pre-install-check.sh report |
 
 ---
@@ -479,7 +559,7 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | NVIDIA driver + open kmod | ~600 MB |
 | FabricManager + NVLSM + NSCQ + NVSDM | ~150 MB |
 | CUDA toolkit 13.0 (toolkit + cudart) | ~3.5 GB |
-| NCCL 2.x +cuda13.0 | ~250 MB |
+| Optional host NCCL 2.x +cuda13.0 | ~250 MB only when `SKIP_NCCL=0` |
 | DCGM 4.x | ~200 MB |
 | Transitive .deb deps | ~500 MB |
 | **NVIDIA bundle subtotal** | **~5 GB** installed (~2?? GB compressed bundle) |
@@ -530,13 +610,15 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 
 ### Moved OUT of "vendor's responsibility" (now handled by install-nvidia.sh ??see Section 0)
 - ~~NVIDIA driver~~ ??`nvidia-driver-580-open` (R580 LTS, 580.159.04 baseline)
-- ~~cuda-toolkit-13-0 + cuda-* + libcudart/libcublas/...~~ ??bundled
-- ~~nvidia-fabricmanager / nvlsm / libnvidia-nscq / libnvsdm~~ ??bundled
-- ~~nvidia-persistenced / nvidia-dcgm services~~ ??enabled
-- ~~libnccl2~~ ??bundled (`+cuda13.0` strict pin)
+- ~~CUDA toolkit~~ ??**minimal subset** (cuda-nvcc / cuda-cudart / cuda-cudart-dev / cuda-cccl / libcublas / libcublas-dev / libnvjitlink / cuda-compat — all `-13-0`). The `cuda-toolkit-13-0` metapackage is DELIBERATELY skipped (see Section 0.1).
+- ~~nvidia-fabricmanager / nvlsm / libnvidia-nscq~~ ??bundled. (`libnvsdm` has no R580 variant in NVIDIA's apt repo and isn't needed for NVSwitch fabric — fabricmanager + libnvidia-nscq own that side.)
+- ~~nvidia-persistenced / nvidia-dcgm services~~ ??enabled. `nvidia-persistenced` rides transitively with `nvidia-driver-580-open` (no separate apt name).
+- ~~libnccl2~~ ??optional host package with `+cuda13.0` strict pin. **SKIP_NCCL=1 by default** at gather and install time. System NCCL is opt-in (`SKIP_NCCL=0` in both scripts); the default avoids ABI skew with PyTorch/vLLM venv-bundled NCCL.
 - ~~Kernel modules / DKMS~~ ??open kmod, no DKMS path needed (Secure Boot off)
 - ~~nouveau blacklist~~ ??`/etc/modprobe.d/blacklist-nouveau-nvidia.conf`
-- ~~Fabric state Completed~~ ??verified by `test-nvidia.sh`
+- ~~nvidia-peermem.ko~~ ??ships inside `nvidia-driver-580-open` and autoloads via `/etc/modules-load.d/nvidia-peermem.conf` written by install-nvidia.sh step 4b. (There is no separate `nvidia-peermem-loader` apt package.)
+- ~~CUDA env wiring~~ ??`/etc/profile.d/cuda.sh` (PATH only) and `/etc/ld.so.conf.d/cuda-system.conf` (`/usr/local/cuda/lib64` in ld.so.cache) — written by install-nvidia.sh step 5b.
+- ~~Fabric state Completed~~ ??verified by `test-nvidia.sh` (now FAILs on a multi-GPU box if the Fabric stanza is absent; SKIP only on single-GPU dev hosts or via `ALLOW_NO_FABRIC=1`).
 
 ---
 
@@ -581,14 +663,14 @@ These are things a typical 8x B300 production server might still need ??they're 
 
 ### 5. Monitoring / observability
 - **Prometheus `node_exporter`** ??NOT installed.
-- **DCGM exporter** ??NOT installed (DCGM itself is vendor's choice).
+- **DCGM exporter** ??NOT installed (DCGM itself is installed by the NVIDIA bundle when available, but install-nvidia.sh treats it as non-fatal/optional).
 - **Grafana / Loki / Telegraf / Fluentd** ??NOT installed.
 - **GPU benchmark baseline** ??install-all.sh does NOT install nccl-tests or any bandwidth tool. To verify NVSwitch is healthy, install `nccl-tests` manually from NVIDIA (`https://github.com/NVIDIA/nccl-tests`) ??it builds against `nvidia-nccl-cu13` from the PyTorch wheel, or against any libnccl the vendor already has on disk.
 - **System-wide NCCL tuning** ??`/etc/profile.d/nccl-multigpu.sh` is NO LONGER written. PyTorch / vLLM use NCCL's defaults. If you want `NCCL_NVLS_ENABLE=1` for in-fabric reductions on B300 NVSwitch, set it in your job submission script or `~/.bashrc`.
 
 ### 6. Multi-node / HPC
-- **InfiniBand / DOCA-OFED stack** ??vendor-installed (DOCA 3.2+ / OFED 25.10+ on the verified box); pre-install-nvidia.sh verifies. `nvidia-peermem-loader` (in NVIDIA bundle) hooks `nvidia-peermem.ko` into mlx5 for GPUDirect RDMA.
-- **NCCL** ??host `libnccl2` IS bundled by install-nvidia.sh with `+cuda13.0` strict pin. No system-wide env vars set; PyTorch wheels also carry `nvidia-nccl-cu13` independently.
+- **InfiniBand / DOCA-OFED stack** ??vendor-installed (DOCA 3.2+ / OFED 25.10+ on the verified box); pre-install-nvidia.sh verifies. `nvidia-peermem.ko` (ships transitively with `nvidia-driver-580-open` — no separate `nvidia-peermem-loader` package) is autoloaded via `/etc/modules-load.d/nvidia-peermem.conf` and hooks into mlx5 for GPUDirect RDMA.
+- **NCCL** ??host `libnccl2` is optional (`SKIP_NCCL=0` in both gather/install) with `+cuda13.0` strict pin. No system-wide env vars set; PyTorch wheels carry `nvidia-nccl-cu13` independently.
 - **SLURM / PBS / LSF** ??NOT bundled.
 - **Passwordless SSH between nodes** ??NOT configured.
 - **NFS / Lustre / BeeGFS client** ??NOT bundled.
@@ -630,7 +712,7 @@ After `install-all.sh` finishes cleanly, the operator should:
 6. Verify `/etc/hosts` resolves the hostname locally (`getent hosts $(hostname)`)
 7. Decide on GPU clock policy: `nvidia-smi -lgc` (lock for deterministic perf), `-pl` (power limit), MIG mode
 8. If running services as system units, ensure they restart after reboot: `systemctl is-enabled xrdp llama-server@<name> disable-thp-defrag`
-9. (Optional) For bandwidth verification, build nccl-tests manually from `https://github.com/NVIDIA/nccl-tests` against the system NCCL installed by install-nvidia.sh (`libnccl2 +cuda13.0`) ??needed only if you suspect fabric degradation.
+9. (Optional) For bandwidth verification, build nccl-tests manually from `https://github.com/NVIDIA/nccl-tests` against PyTorch's bundled `nvidia-nccl-cu13`, or against host `libnccl2 +cuda13.0` only if you installed it with `SKIP_NCCL=0`.
 10. Set up `HF_HOME` and any other cache env vars in `/etc/profile.d/`
 11. For maximum vLLM performance on B300 NVSwitch, export `NCCL_NVLS_ENABLE=1 NCCL_P2P_LEVEL=NVL` in your job script (these are no longer set globally)
 12. If you want monitoring: install node_exporter and DCGM exporter (out of scope here)

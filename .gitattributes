@@ -1,0 +1,41 @@
+# Force LF line endings on every file bash or systemd interprets on the
+# target. Without this, Windows editors (or git's autocrlf=true) silently
+# rewrite scripts with CRLF, which bash on Linux rejects with a misleading
+# "syntax error near unexpected token `$'in\r''" (see test-nvidia.sh
+# CRLF incident, 2026-05).
+#
+# `text eol=lf` overrides any global core.autocrlf setting for matching paths.
+
+*.sh           text eol=lf
+*.bash         text eol=lf
+*.bashrc       text eol=lf
+Makefile       text eol=lf
+Dockerfile     text eol=lf
+*.service      text eol=lf
+*.conf         text eol=lf
+*.env          text eol=lf
+*.list         text eol=lf
+*.cfg          text eol=lf
+*.json         text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.py           text eol=lf
+*.txt          text eol=lf
+*.md           text eol=lf
+.gitattributes text eol=lf
+
+# Binary files — never modify
+*.deb          binary
+*.whl          binary
+*.tar          binary
+*.tar.gz       binary
+*.tgz          binary
+*.tar.xz       binary
+*.tar.bz2      binary
+*.zip          binary
+*.bin          binary
+*.sha256       binary
+*.png          binary
+*.jpg          binary
+*.pdf          binary
+*.h5           binary

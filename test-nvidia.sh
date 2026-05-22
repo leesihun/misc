@@ -10,9 +10,11 @@
 #     - 8x GPUs visible, Blackwell device-id, ECC + persistence states
 #     - nvidia-fabricmanager active, NVLSM daemon up
 #     - All GPUs report Fabric State = Completed
-#     - CUDA toolkit installed, nvcc reports CUDA 13.x
-#     - libnccl2 installed with +cuda13.0 suffix
-#     - DCGM service status (informational)
+#     - CUDA minimal toolkit installed (nvcc/cudart/cccl/cublas/nvjitlink),
+#       /etc/profile.d/cuda.sh + /etc/ld.so.conf.d/cuda-system.conf present,
+#       nvcc reports CUDA 13.x
+#     - libnccl2 installed with +cuda13.0 suffix (or SKIPPED - default)
+#     - DCGM status if installed (optional)
 #     - nvidia-peermem module loaded (multi-node RDMA)
 #
 #   Usage:
@@ -27,6 +29,7 @@ DRIVER_BRANCH="${DRIVER_BRANCH:-580}"
 CUDA_MAJOR="${CUDA_MAJOR:-13}"
 CUDA_MINOR="${CUDA_MINOR:-0}"
 EXPECTED_GPUS="${EXPECTED_GPUS:-8}"
+SKIP_DCGM="${SKIP_DCGM:-0}"
 
 JSON_OUT=0
 while (( $# > 0 )); do
@@ -68,6 +71,20 @@ check_dpkg() {
     local abbrev="${state%%|*}" ver="${state##*|}"
     # Accept both "ii" (install/installed) and "hi" (hold/installed) — install-nvidia.sh
     # deliberately `apt-mark hold`s every NVIDIA package, so `hi` is the expected end state.
+    local trimmed="${abbrev%% *}"
+    case "$trimmed" in
+        ii|hi) record "dpkg: $pkg" PASS "$ver" ;;
+        *)     record "dpkg: $pkg" FAIL "state=$abbrev ver=$ver" ;;
+    esac
+}
+
+check_dpkg_optional() {
+    local pkg="$1" state
+    state=$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}\n' "$pkg" 2>/dev/null || true)
+    if [[ -z "$state" ]]; then
+        record "dpkg: $pkg" SKIP "optional package not installed"; return
+    fi
+    local abbrev="${state%%|*}" ver="${state##*|}"
     local trimmed="${abbrev%% *}"
     case "$trimmed" in
         ii|hi) record "dpkg: $pkg" PASS "$ver" ;;
@@ -204,7 +221,17 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     total=$(printf '%s\n' "$fab_q" | grep -c . || true)
     ok=$(printf '%s\n' "$fab_q" | grep -c '^Completed$' || true)
     if (( total == 0 )); then
-        record "fabric state (per GPU)" SKIP "no Fabric stanza in nvidia-smi -q (FM not initialized?)"
+        # On a single-GPU dev box (EXPECTED_GPUS=1) the Fabric stanza is
+        # legitimately absent — no NVSwitch, no FabricManager work to do.
+        # On a multi-GPU NVSwitch box (B300 HGX, EXPECTED_GPUS>=2) the
+        # absence means FabricManager didn't initialize: that's a hard
+        # failure, not a "feature unavailable". Override the FAIL only with
+        # an explicit ALLOW_NO_FABRIC=1 for unusual recovery scenarios.
+        if (( EXPECTED_GPUS <= 1 )) || [[ "${ALLOW_NO_FABRIC:-0}" == "1" ]]; then
+            record "fabric state (per GPU)" SKIP "no Fabric stanza in nvidia-smi -q (single-GPU or ALLOW_NO_FABRIC=1)"
+        else
+            record "fabric state (per GPU)" FAIL "no Fabric stanza on a $EXPECTED_GPUS-GPU box — FabricManager did not initialize NVSwitch. Set ALLOW_NO_FABRIC=1 only for explicit recovery."
+        fi
     elif (( total != EXPECTED_GPUS )); then
         # Parser sanity check: if we matched a count != GPU count, surface that
         # instead of a misleading "rest pending" — the awk pattern is the bug.
@@ -219,7 +246,9 @@ else
 fi
 
 # Also check the NVLSM child process is alive (FM unit owns it on most builds).
-if pgrep -x nvlsm >/dev/null 2>&1; then
+if (( EXPECTED_GPUS <= 1 )) || [[ "${ALLOW_NO_FABRIC:-0}" == "1" ]]; then
+    record "nvlsm process" SKIP "no NVSwitch fabric required for this run"
+elif pgrep -x nvlsm >/dev/null 2>&1; then
     record "nvlsm process" PASS "running"
 else
     record "nvlsm process" FAIL "no nvlsm process — NVSwitch routing tables not configured"
@@ -250,8 +279,29 @@ fi
 # ============================================================================
 step "5. CUDA toolkit ${CUDA_MAJOR}.${CUDA_MINOR}"
 
-check_dpkg "cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
+# install-nvidia.sh deliberately avoids the cuda-toolkit-${MAJOR}-${MINOR}
+# metapackage (it pulls cuFFT/cuSPARSE/NPP we don't need) and installs the
+# minimal set directly. Check each piece individually so MISSING calls out
+# the specific package that failed instead of a vague "toolkit missing".
+check_dpkg "cuda-nvcc-${CUDA_MAJOR}-${CUDA_MINOR}"
 check_dpkg "cuda-cudart-${CUDA_MAJOR}-${CUDA_MINOR}"
+check_dpkg "cuda-cudart-dev-${CUDA_MAJOR}-${CUDA_MINOR}"
+check_dpkg "cuda-cccl-${CUDA_MAJOR}-${CUDA_MINOR}"
+check_dpkg "libcublas-${CUDA_MAJOR}-${CUDA_MINOR}"
+check_dpkg "libcublas-dev-${CUDA_MAJOR}-${CUDA_MINOR}"
+check_dpkg "libnvjitlink-${CUDA_MAJOR}-${CUDA_MINOR}"
+
+# CUDA env wiring written by install-nvidia.sh step 5b.
+if [[ -r /etc/profile.d/cuda.sh ]] && grep -q '/usr/local/cuda/bin' /etc/profile.d/cuda.sh 2>/dev/null; then
+    record "config: /etc/profile.d/cuda.sh" PASS "nvcc on login PATH"
+else
+    record "config: /etc/profile.d/cuda.sh" FAIL "missing or empty — nvcc won't be on PATH for login shells"
+fi
+if [[ -r /etc/ld.so.conf.d/cuda-system.conf ]] && ldconfig -p 2>/dev/null | grep -q 'libcudart.so'; then
+    record "ld.so cache: libcudart" PASS "$(ldconfig -p | grep -m1 'libcudart.so' | awk '{print $NF}')"
+else
+    record "ld.so cache: libcudart" FAIL "libcudart.so not in ldconfig cache — non-venv binaries (llama-cli) will fail to load"
+fi
 
 NVCC_BIN=""
 for c in nvcc /usr/local/cuda/bin/nvcc "/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}/bin/nvcc"; do
@@ -292,14 +342,19 @@ fi
 # ============================================================================
 step "7. DCGM"
 
-check_dpkg "datacenter-gpu-manager-4-cuda${CUDA_MAJOR}"
-check_service "nvidia-dcgm" 0
-
-if command -v dcgmi >/dev/null 2>&1; then
-    dcgm_ver=$(dcgmi --version 2>&1 | head -1)
-    record "dcgm: dcgmi --version" PASS "$dcgm_ver"
+if [[ "$SKIP_DCGM" == "1" ]]; then
+    record "dpkg: datacenter-gpu-manager-4-cuda${CUDA_MAJOR}" SKIP "SKIP_DCGM=1"
+    record "service: nvidia-dcgm" SKIP "SKIP_DCGM=1"
 else
-    record "dcgm: dcgmi --version" MISSING "dcgmi not on PATH"
+    check_dpkg_optional "datacenter-gpu-manager-4-cuda${CUDA_MAJOR}"
+    check_service "nvidia-dcgm" 0
+
+    if command -v dcgmi >/dev/null 2>&1; then
+        dcgm_ver=$(dcgmi --version 2>&1 | head -1)
+        record "dcgm: dcgmi --version" PASS "$dcgm_ver"
+    else
+        record "dcgm: dcgmi --version" SKIP "optional binary not on PATH"
+    fi
 fi
 
 # ============================================================================
@@ -318,6 +373,127 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     fi
     ecc=$(nvidia-smi --query-gpu=ecc.mode.current --format=csv,noheader 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
     record "ecc mode" PASS "${ecc:-?}"
+fi
+
+# ============================================================================
+# 9. Production-grade GPU sanity (HGX B300)
+#    Catches subtle misconfigs that pass earlier checks but degrade workloads:
+#    - PCIe link not at full Gen5 x16 (firmware/topology issue)
+#    - NVLink lanes count mismatch (broken fabric, but Fabric State still
+#      reports Completed because peer-init succeeded on the remaining lanes)
+#    - MIG mode accidentally enabled (incompatible with LLM tensor-parallel)
+#    - Confidential Computing mode left on (limits perf + GPU sharing)
+#    - Duplicate GPU UUIDs (very rare; happens after firmware reflash without
+#      proper provisioning — breaks UUID-based GPU pinning)
+#    - Kernel module version != installed driver package version (kmod from a
+#      prior install still loaded; reboot needed)
+# ============================================================================
+step "9. Production sanity (HGX B300)"
+
+# nvidia-smi presence already covered by step 1. Skip the rest if absent.
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+
+    # (a) Kernel module version == installed driver package version.
+    # If they disagree, the running kmod is from a previous install and a
+    # reboot is mandatory — fabricmanager will refuse to talk to it.
+    pkg_drv_ver=$(dpkg-query -W -f='${Version}' "nvidia-driver-${DRIVER_BRANCH}-open" 2>/dev/null | sed 's/-.*//')
+    if [[ -n "$pkg_drv_ver" && -n "$KMOD_VER" ]]; then
+        if [[ "$KMOD_VER" == "${pkg_drv_ver}"* ]] || [[ "$pkg_drv_ver" == "${KMOD_VER}"* ]]; then
+            record "kmod vs package version" PASS "kmod=$KMOD_VER  pkg=$pkg_drv_ver"
+        else
+            record "kmod vs package version" FAIL "kmod=$KMOD_VER pkg=$pkg_drv_ver — reboot required"
+        fi
+    fi
+
+    # (b) PCIe link generation + width per GPU. Expect Gen5 x16 on B300.
+    # nvidia-smi reports `gen` as the negotiated PCIe gen number (5), `width`
+    # as the negotiated lane count (16). On a slot reseat issue or BIOS
+    # misconfig this can drop to Gen4 x16 or Gen5 x8 — workload still runs,
+    # just at half host bandwidth.
+    pcie_data=$(nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv,noheader,nounits 2>/dev/null)
+    if [[ -n "$pcie_data" ]]; then
+        bad_pcie=$(printf '%s\n' "$pcie_data" | awk -F',' '
+            { gsub(/ /, "", $1); gsub(/ /, "", $2)
+              if ($1 != "5" || $2 != "16") n++ }
+            END { print n+0 }')
+        total_pcie=$(printf '%s\n' "$pcie_data" | grep -c .)
+        if (( bad_pcie == 0 )); then
+            record "PCIe Gen5 x16 (per GPU)" PASS "all $total_pcie GPU(s) at Gen5 x16"
+        else
+            sample=$(printf '%s\n' "$pcie_data" | awk -F',' 'NR==1 {gsub(/ /, ""); print $1"x"$2}')
+            record "PCIe Gen5 x16 (per GPU)" FAIL "$bad_pcie/$total_pcie GPU(s) below Gen5 x16 (e.g. Gen${sample})"
+        fi
+    fi
+
+    # (c) NVLink lane count per GPU. B300 = 18 NVLink5 lanes per GPU.
+    # `nvidia-smi nvlink --status` prints one line per lane "GPU 0: NVLink 0: ..."
+    # An "inactive" lane (cable issue, port fault) reduces aggregate fabric BW
+    # without failing Fabric State.
+    if nvidia-smi nvlink --status >/dev/null 2>&1; then
+        nv_status=$(nvidia-smi nvlink --status 2>/dev/null)
+        per_gpu_counts=$(printf '%s\n' "$nv_status" | awk '
+            /^GPU [0-9]+:/ { gpu = $2; sub(/:/, "", gpu); next }
+            /Link [0-9]+:.*GB\/s/ && !/Disabled|Inactive/ { active[gpu]++ }
+            END { for (g in active) print active[g] }
+        ')
+        gpu_count_with_nvl=$(printf '%s\n' "$per_gpu_counts" | grep -c . || true)
+        expected_lanes="${EXPECTED_NVLINK_LANES:-18}"
+        if (( gpu_count_with_nvl == 0 )); then
+            record "NVLink lanes per GPU" SKIP "no NVLink data in nvlink --status"
+        else
+            mismatched=$(printf '%s\n' "$per_gpu_counts" \
+                | awk -v exp="$expected_lanes" '$1 != exp { n++ } END { print n+0 }')
+            min_lanes=$(printf '%s\n' "$per_gpu_counts" | sort -n | head -1)
+            if (( mismatched == 0 )); then
+                record "NVLink lanes per GPU" PASS "$gpu_count_with_nvl GPU(s) × $expected_lanes active lanes"
+            else
+                record "NVLink lanes per GPU" FAIL "$mismatched/$gpu_count_with_nvl GPU(s) below $expected_lanes lanes (min observed: $min_lanes). Set EXPECTED_NVLINK_LANES=N if your B300 SKU advertises a different count."
+            fi
+        fi
+    fi
+
+    # (d) MIG mode. HGX B300 LLM workloads don't use MIG — accidental enable
+    # would break tensor-parallel partitioning of the model.
+    mig_modes=$(nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+    if [[ -z "$mig_modes" ]] || [[ "$mig_modes" == "N/A" ]]; then
+        record "MIG mode (must be disabled)" PASS "N/A — MIG not supported or not exposed (ok)"
+    elif [[ "$mig_modes" == "Disabled" ]]; then
+        record "MIG mode (must be disabled)" PASS "Disabled on all GPUs"
+    else
+        record "MIG mode (must be disabled)" FAIL "$mig_modes — run: sudo nvidia-smi -i <id> -mig 0"
+    fi
+
+    # (e) Confidential Computing mode. On B300, CC has runtime cost and
+    # restricts multi-process GPU sharing; for normal LLM training/inference
+    # we want it OFF. Query may exit non-zero on older drivers; treat as SKIP.
+    if cc_out=$(nvidia-smi conf-compute -f 2>&1); then
+        if printf '%s' "$cc_out" | grep -qiE 'mode.*off|disabled|protected mode\s*:\s*off'; then
+            record "Confidential Computing OFF" PASS "$(printf '%s' "$cc_out" | head -1 | tr -d '\r')"
+        elif printf '%s' "$cc_out" | grep -qiE 'mode.*on|enabled|protected mode\s*:\s*on'; then
+            record "Confidential Computing OFF" FAIL "$(printf '%s' "$cc_out" | head -1 | tr -d '\r') — disable: nvidia-smi conf-compute -srs 0"
+        else
+            record "Confidential Computing OFF" SKIP "could not parse: $(printf '%s' "$cc_out" | head -1)"
+        fi
+    else
+        record "Confidential Computing OFF" SKIP "nvidia-smi conf-compute not supported on this driver"
+    fi
+
+    # (f) GPU UUIDs all unique. Duplicates are rare but they break any tool
+    # that maps GPUs by UUID (Kubernetes device plugin, MIG instances,
+    # dcgmi, custom orchestrators).
+    uuids=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | tr -d ' ')
+    if [[ -n "$uuids" ]]; then
+        total_uuid=$(printf '%s\n' "$uuids" | grep -c .)
+        unique_uuid=$(printf '%s\n' "$uuids" | sort -u | grep -c .)
+        if (( total_uuid == unique_uuid )); then
+            record "GPU UUIDs unique" PASS "$unique_uuid/$total_uuid distinct"
+        else
+            record "GPU UUIDs unique" FAIL "$unique_uuid distinct, $total_uuid total — duplicate UUIDs detected"
+        fi
+    fi
+
+else
+    record "production sanity" SKIP "nvidia-smi not usable; covered by earlier checks"
 fi
 
 # ============================================================================

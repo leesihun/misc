@@ -212,12 +212,35 @@ if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
         record "GPU SKU" FAIL "$(printf '%s' "$names" | tr -d '\n')"
     fi
 
-    # Fabric state
-    fab=$(nvidia-smi -q 2>/dev/null | grep -E 'Fabric State|^\s+State' | head -16)
-    if printf '%s' "$fab" | grep -qE '(Completed|Success)'; then
-        record "fabric.state" PASS "Completed"
+    # Fabric state: count the real per-GPU Fabric State entries. A loose grep
+    # can pass when one GPU says Completed while another is still pending.
+    fab=$(nvidia-smi -q 2>/dev/null | awk '
+        /^[[:space:]]+(GPU[[:space:]]+)?Fabric[[:space:]]*$/ {
+            in_fabric = 1; captured = 0; next
+        }
+        in_fabric && !captured && /^[[:space:]]+State[[:space:]]*:/ {
+            v = $0; sub(/.*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+            print v
+            captured = 1; in_fabric = 0; next
+        }
+        in_fabric && /^[[:space:]]+[A-Z][A-Za-z0-9 ]*[[:space:]]*$/ {
+            in_fabric = 0
+        }
+        /^[[:space:]]+Fabric[[:space:]]+State[[:space:]]*:/ {
+            v = $0; sub(/.*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+            print v
+        }
+    ')
+    fab_total=$(printf '%s\n' "$fab" | grep -c . || true)
+    fab_ok=$(printf '%s\n' "$fab" | grep -cE '^(Completed|Success)$' || true)
+    if (( fab_total == 0 )); then
+        record "fabric.state" FAIL "not reported - common cause of CUDA Error 802"
+    elif (( fab_total != n )); then
+        record "fabric.state" FAIL "matched $fab_total Fabric entries for $n GPU(s) ($fab_ok Completed/Success)"
+    elif (( fab_ok == fab_total )); then
+        record "fabric.state" PASS "$fab_ok/$fab_total Completed/Success"
     else
-        record "fabric.state" FAIL "not Completed — common cause of CUDA Error 802"
+        record "fabric.state" FAIL "$fab_ok/$fab_total Completed/Success - common cause of CUDA Error 802"
     fi
 fi
 

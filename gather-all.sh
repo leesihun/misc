@@ -21,9 +21,14 @@
 #
 #   What this does NOT bundle (lives in the nvidia-airgap-bundle):
 #     - NVIDIA driver / open kernel modules
-#     - cuda-toolkit-13-0 / cudart / cuda-compat
-#     - nvidia-fabricmanager / nvlsm / libnvidia-nscq / libnvsdm
-#     - libnccl2 / DCGM
+#     - CUDA MINIMAL toolkit set: cuda-nvcc-13-0, cuda-cudart-13-0,
+#       cuda-cudart-dev-13-0, cuda-cccl-13-0, libcublas-13-0, libcublas-dev-13-0,
+#       libnvjitlink-13-0, cuda-compat-13-0  (we deliberately AVOID the
+#       cuda-toolkit-13-0 metapkg — see gather-nvidia.sh for the rationale)
+#     - nvidia-fabricmanager / nvlsm / libnvidia-nscq
+#     - libnccl2 + libnccl-dev (gathered, but SKIP_NCCL=1 by default at
+#       install time — system NCCL is opt-in)
+#     - DCGM
 #     - K3s, Helm, kubectl, container images (out of scope)
 #
 #   Output:
@@ -1060,10 +1065,22 @@ for helper in install-all.sh pre-install-check.sh test-all.sh; do
     fi
 done
 
+# Bundle the install-all.d/ step scripts. The launcher install-all.sh sources
+# 00-common.sh from this dir and invokes 01-..17- in order; without these the
+# launcher exits immediately on the target.
+if [[ -d "$SCRIPT_DIR/install-all.d" ]]; then
+    rm -rf "$OUT_DIR/install-all.d"
+    cp -r "$SCRIPT_DIR/install-all.d" "$OUT_DIR/install-all.d"
+    find "$OUT_DIR/install-all.d" -name '*.sh' -exec chmod +x {} +
+    log "Bundled helper dir: install-all.d/ ($(ls "$OUT_DIR/install-all.d" | wc -l) files)"
+else
+    die "install-all.d/ not found at $SCRIPT_DIR — cannot ship a bundle without the step scripts."
+fi
+
 log "Generating SHA256 manifest (excluding meta/SHA256SUMS itself)"
 (
     cd "$OUT_DIR"
-    find install-all.sh pre-install-check.sh test-all.sh debs apps wheels requirements src meta \
+    find install-all.sh install-all.d pre-install-check.sh test-all.sh debs apps wheels requirements src meta \
         -type f \
         ! -path 'meta/SHA256SUMS' \
         -print0 2>/dev/null \
@@ -1081,12 +1098,19 @@ log "Generating bundle SHA256 sidecar"
 ( cd "$BUNDLE_PARENT" && sha256sum "$(basename "$BUNDLE_BIN")" > "$(basename "$BUNDLE_BIN").sha256" )
 
 # Copy installer helpers next to the bundle so the user only needs to
-# transfer four files (bundle + .sha256 + installer + pre-flight).
+# transfer the bundle + .sha256 + these scripts (the bundle ALSO carries
+# them, but having them sibling lets users invoke pre-install-check.sh
+# without first extracting).
 for helper in install-all.sh pre-install-check.sh test-all.sh; do
     [[ -f "$SCRIPT_DIR/$helper" ]] || continue
     cp "$SCRIPT_DIR/$helper" "$BUNDLE_PARENT/$helper"
     chmod +x "$BUNDLE_PARENT/$helper"
 done
+if [[ -d "$SCRIPT_DIR/install-all.d" ]]; then
+    rm -rf "$BUNDLE_PARENT/install-all.d"
+    cp -r "$SCRIPT_DIR/install-all.d" "$BUNDLE_PARENT/install-all.d"
+    find "$BUNDLE_PARENT/install-all.d" -name '*.sh' -exec chmod +x {} +
+fi
 
 log "Done."
 printf '\n'
@@ -1098,14 +1122,17 @@ printf '  Verifier  : %s\n' "$BUNDLE_PARENT/test-all.sh"
 printf '  Staging   : %s\n' "$OUT_DIR"
 printf '\n'
 printf 'Transfer to airgapped server:\n'
-printf '  scp "%s" "%s" \\\n         "%s" "%s" "%s" user@SERVER:~\n' \
+printf '  scp -r "%s" "%s" \\\n         "%s" "%s" "%s" "%s/install-all.d" user@SERVER:~\n' \
     "$BUNDLE_BIN" "${BUNDLE_BIN}.sha256" \
     "$BUNDLE_PARENT/pre-install-check.sh" \
     "$BUNDLE_PARENT/install-all.sh" \
-    "$BUNDLE_PARENT/test-all.sh"
+    "$BUNDLE_PARENT/test-all.sh" \
+    "$BUNDLE_PARENT"
 printf '  ssh user@SERVER\n'
 printf '  sudo bash pre-install-check.sh   # readiness gate\n'
-printf '  sudo bash install-all.sh         # auto-extracts the bundle\n'
+printf '  sudo bash install-all.sh         # auto-extracts the bundle, runs install-all.d/01-..17-\n'
+printf '  sudo bash install-all.sh --list  # any time: see per-step status\n'
+printf '  sudo bash install-all.sh --rerun 14   # re-run a specific failed step\n'
 printf '  sudo bash test-all.sh            # post-install verification\n'
 printf '\n'
 printf 'Bundle variant: prepped (vendor pre-installed driver + CUDA 13.0)\n'

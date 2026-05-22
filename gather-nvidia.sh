@@ -16,9 +16,12 @@
 #     - cuda-drivers-580 plus the matching fabricmanager/NSCQ packages
 #     - nvlsm (4th-gen NVSwitch — runs as a child of nvidia-fabricmanager)
 #     - nvidia-modprobe
-#     - cuda-toolkit-13-0 (toolkit only — NOT cuda/cuda-13-0 metapkgs that
-#       drag the driver back in)
-#     - libnccl2 / libnccl-dev pinned to +cuda13.0 suffix
+#     - CUDA toolkit MINIMAL subset (NOT cuda-toolkit-13-0 metapkg, which
+#       drags ~3 GB of cuFFT/cuSPARSE/NPP/nvJPEG that install-nvidia.sh
+#       never installs): cuda-nvcc-13-0, cuda-cudart-13-0, cuda-cudart-dev-13-0,
+#       cuda-cccl-13-0, libcublas-13-0, libcublas-dev-13-0, libnvjitlink-13-0,
+#       cuda-compat-13-0
+#     - Optional host libnccl2 / libnccl-dev pinned to +cuda13.0 suffix
 #     - datacenter-gpu-manager-4-cuda13 (DCGM 4.3.x+)
 #     - nvidia-driver-pinning-580 (apt unattended-upgrade guard)
 #     - Full transitive .deb closure via apt-rdepends
@@ -26,7 +29,8 @@
 #   What this does NOT bundle:
 #     - DOCA-OFED — vendor pre-installed it (verified by pre-install-nvidia.sh)
 #     - Userland (xfce4, python, vscode, etc.) — that's gather-all.sh
-#     - cuda/cuda-13-0/nvidia-open metapackages that pull the driver in again
+#     - cuda/cuda-13-0/cuda-toolkit-13-0/nvidia-open metapackages
+#     - cuFFT/cuSPARSE/NPP/nvJPEG runtime libs (unused; pip wheels ship their own)
 #
 #   Output:
 #     - ~/GPU_server_downloads_nvidia/                          (staging)
@@ -38,7 +42,7 @@
 #     bash gather-nvidia.sh                          # latest 580.x.y
 #     DRIVER_BRANCH=580 bash gather-nvidia.sh        # explicit branch
 #     PIN_DRIVER_VER=580.159.04 bash gather-nvidia.sh # pin a specific version
-#     SKIP_NCCL=1 bash gather-nvidia.sh              # rely on PyTorch wheel NCCL
+#     SKIP_NCCL=0 bash gather-nvidia.sh              # include host NCCL .debs
 # ============================================================================
 set -euo pipefail
 
@@ -55,7 +59,7 @@ APT_STAGE_ARCHIVES_DIR="$APT_STAGE_CACHE_DIR/archives"
 DRIVER_BRANCH="${DRIVER_BRANCH:-580}"          # R580 LTS until 2028-06
 DRIVER_FLAVOR="${DRIVER_FLAVOR:-open}"         # Blackwell requires open kernel modules
 PIN_DRIVER_VER="${PIN_DRIVER_VER:-}"            # empty = latest in repo
-SKIP_NCCL="${SKIP_NCCL:-0}"
+SKIP_NCCL="${SKIP_NCCL:-1}"
 CUDA_MAJOR="${CUDA_MAJOR:-13}"
 CUDA_MINOR="${CUDA_MINOR:-0}"
 NCCL_CUDA_SUFFIX="${NCCL_CUDA_SUFFIX:-cuda${CUDA_MAJOR}.${CUDA_MINOR}}"
@@ -368,11 +372,25 @@ NV_PKGS=(
     # Monitoring
     "datacenter-gpu-manager-4-cuda${CUDA_MAJOR}"
 
-    # CUDA toolkit (NOT cuda / cuda-13-0 metapkg — those pull driver again)
-    "cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
-    "cuda-cudart-${CUDA_MAJOR}-${CUDA_MINOR}"
-    "cuda-cudart-dev-${CUDA_MAJOR}-${CUDA_MINOR}"
-    "${CUDA_COMPAT_PKG}=${CUDA_COMPAT_VER}"       # forward-compat, optional but cheap
+    # CUDA toolkit — explicit MINIMAL set. We deliberately AVOID:
+    #   - cuda / cuda-${MAJOR}-${MINOR}      — pulls the driver again
+    #   - cuda-toolkit-${MAJOR}-${MINOR}     — ~3 GB metapkg with cuFFT/cuSPARSE/
+    #                                          NPP/nvJPEG that install-nvidia.sh
+    #                                          never installs (PyTorch/vLLM
+    #                                          venvs ship their own runtime via
+    #                                          pip nvidia-*-cu13 packages).
+    # This list matches the CORE_PKGS / CUDA_PKGS arrays in install-nvidia.sh
+    # — keep them in lockstep. The dependency closure step below still pulls
+    # the transitive runtime libs (libcudart12, etc.) so headers + shared
+    # libs are all present in the bundle.
+    "cuda-nvcc-${CUDA_MAJOR}-${CUDA_MINOR}"            # nvcc compiler
+    "cuda-cudart-${CUDA_MAJOR}-${CUDA_MINOR}"          # libcudart.so runtime
+    "cuda-cudart-dev-${CUDA_MAJOR}-${CUDA_MINOR}"      # headers + static
+    "cuda-cccl-${CUDA_MAJOR}-${CUDA_MINOR}"            # Thrust/CUB headers
+    "libcublas-${CUDA_MAJOR}-${CUDA_MINOR}"            # libcublas.so + libcublasLt.so
+    "libcublas-dev-${CUDA_MAJOR}-${CUDA_MINOR}"        # cublas headers
+    "libnvjitlink-${CUDA_MAJOR}-${CUDA_MINOR}"         # JIT-link (cublasLt loads it)
+    "${CUDA_COMPAT_PKG}=${CUDA_COMPAT_VER}"            # forward-compat, optional but cheap
 )
 
 if [[ -n "$FM_META_PKG" ]]; then
@@ -480,6 +498,61 @@ sudo chown -R "$(id -u):$(id -g)" "$OUT_DIR/debs"
 sudo rm -rf "$APT_STAGE_CACHE_DIR"
 
 # ============================================================================
+# Closure integrity.
+#
+# Two different failure modes need different severities:
+#
+#   closure-unresolved.txt — apt-rdepends pulled a package name (often virtual,
+#     like `awk`, `dbus-session-bus`, `default-mta`) that has no concrete
+#     candidate in apt-cache. Usually fine: a sibling concrete package in the
+#     closure satisfies the virtual name at install time. Worth warning about
+#     so a maintainer can extend _apt_preferred_provider when a new virtual
+#     name appears, but NOT fatal.
+#
+#   closure-failed.txt — _apt_download_stage exhausted retries on a real
+#     concrete package name. The bundle will be missing this .deb, so the
+#     target install will fail with "unable to locate package" — much harder
+#     to diagnose post-transfer than here. FATAL unless explicitly overridden.
+#
+# Escape hatch (failed): GATHER_ALLOW_CLOSURE_FAILURES=1 — forensic use only.
+# ============================================================================
+step "Closure integrity check"
+GATHER_ALLOW_CLOSURE_FAILURES="${GATHER_ALLOW_CLOSURE_FAILURES:-0}"
+
+_unresolved_count=0
+if [[ -s "$OUT_DIR/meta/closure-unresolved.txt" ]]; then
+    _unresolved_count=$(wc -l < "$OUT_DIR/meta/closure-unresolved.txt" | tr -d ' ')
+fi
+_failed_count=0
+if [[ -s "$OUT_DIR/meta/closure-failed.txt" ]]; then
+    _failed_count=$(wc -l < "$OUT_DIR/meta/closure-failed.txt" | tr -d ' ')
+fi
+
+if (( _unresolved_count > 0 )); then
+    warn "$_unresolved_count virtual package(s) in meta/closure-unresolved.txt have no concrete candidate."
+    warn "These are usually fine (sibling packages satisfy the virtual name). Inspect with:"
+    warn "  cat $OUT_DIR/meta/closure-unresolved.txt"
+    warn "If the target install later complains 'package X is not available', extend"
+    warn "_apt_preferred_provider in gather-all.sh and re-gather."
+fi
+
+if (( _failed_count > 0 )); then
+    warn "$_failed_count concrete package(s) in meta/closure-failed.txt failed to download."
+    warn "Inspect with:"
+    warn "  cat $OUT_DIR/meta/closure-failed.txt"
+    warn "  cat $OUT_DIR/meta/apt-download-errors.log"
+    if [[ "$GATHER_ALLOW_CLOSURE_FAILURES" == "1" ]]; then
+        warn "GATHER_ALLOW_CLOSURE_FAILURES=1 — packaging despite missing concrete .debs (forensic mode)."
+    else
+        die "Refusing to package a bundle with missing concrete .debs. Set GATHER_ALLOW_CLOSURE_FAILURES=1 only after auditing the failed list."
+    fi
+fi
+
+if (( _unresolved_count == 0 && _failed_count == 0 )); then
+    log "Closure: all transitive deps downloaded."
+fi
+
+# ============================================================================
 # Sanity: every top-level package must be present in debs/
 # ============================================================================
 step "Sanity check"
@@ -541,6 +614,85 @@ done
 unset _preferred_ver _keep_path _newest_ver _newest_path
 shopt -u nullglob
 
+# ============================================================================
+# Driver-version-skew check (driver-locked siblings only)
+#
+# NVIDIA ships the driver as a set of packages that MUST agree on the
+# upstream version (e.g. 580.159.04). If apt-rdepends pulled a transitive
+# .deb whose Version is from a different driver release than $PIN_DRIVER_VER,
+# nvidia-fabricmanager will refuse to start at runtime ("version mismatch
+# between these = FM abort", see install-nvidia.sh:339 comment).
+#
+# What we DO check (driver-locked siblings — Version field must match):
+#   libnvidia-compute-580, libnvidia-decode-580, libnvidia-encode-580,
+#   libnvidia-fbc1-580, libnvidia-extra-580, libnvidia-gl-580,
+#   libnvidia-opencl-580, libnvidia-cfg1-580, libnvidia-common-580,
+#   nvidia-utils-580, nvidia-compute-utils-580, nvidia-kernel-common-580,
+#   nvidia-kernel-source-580, xserver-xorg-video-nvidia-580
+#
+# What we DON'T check (legitimately may differ from $PIN_DRIVER_VER):
+#   nvidia-firmware-580-* — NVIDIA encodes the firmware version in the
+#     PACKAGE NAME (e.g. nvidia-firmware-580-server-580.159.03), with a
+#     mundane Version field like 0ubuntu0.24.04.1. A .04 driver legitimately
+#     Depend:s on the .03 firmware package when firmware didn't need a bump.
+#   nvidia-modprobe / nvidia-settings / libxnvctrl* / nvidia-prime — these
+#     are user-space tools versioned independently from the kernel driver.
+#   cuda-* packages — CUDA toolkit pins separately to BUNDLE_CUDA, not the
+#     driver version.
+#
+# Escape hatch: GATHER_ALLOW_DRIVER_SKEW=1 — forensic use only.
+# ============================================================================
+step "Driver-version-skew check"
+GATHER_ALLOW_DRIVER_SKEW="${GATHER_ALLOW_DRIVER_SKEW:-0}"
+
+# Build the regex matching driver-locked sibling packages. ${DRIVER_BRANCH}
+# is interpolated so the same gather script handles R570/R575/R580/etc.
+DRIVER_LOCKED_RE="^(libnvidia-(compute|decode|encode|fbc1|extra|gl|opencl|cfg1|common)-${DRIVER_BRANCH}|nvidia-(utils|compute-utils|kernel-common|kernel-source)-${DRIVER_BRANCH}|xserver-xorg-video-nvidia-${DRIVER_BRANCH})$"
+
+# Scalar counter + temp file rather than an associative array. Empty
+# associative arrays expanded as ${#arr[@]} under `set -u` historically
+# trip "unbound variable" on some bash versions; the counter form is
+# bulletproof and produces identical reporting.
+_skew_count=0
+_skew_log="$OUT_DIR/meta/.driver-skew.log"
+: > "$_skew_log"
+
+shopt -s nullglob
+for f in "$OUT_DIR"/debs/*.deb; do
+    pkg=$(dpkg-deb -f "$f" Package 2>/dev/null || true)
+    ver=$(dpkg-deb -f "$f" Version 2>/dev/null || true)
+    [[ -n "$pkg" && -n "$ver" ]] || continue
+    [[ "$pkg" =~ $DRIVER_LOCKED_RE ]] || continue
+    # Version field is e.g. "580.159.04-1ubuntu1". Strip the apt revision
+    # and compare the upstream portion to $PIN_DRIVER_VER.
+    upstream="${ver%%-*}"
+    if [[ "$upstream" != "$PIN_DRIVER_VER" ]]; then
+        printf '  %s=%s\n' "$pkg" "$ver" >> "$_skew_log"
+        _skew_count=$((_skew_count + 1))
+    fi
+done
+shopt -u nullglob
+
+if (( _skew_count > 0 )); then
+    warn "Driver-version skew detected — $_skew_count driver-locked package(s) don't match PIN_DRIVER_VER=$PIN_DRIVER_VER:"
+    sort -u "$_skew_log" >&2
+    warn "These packages MUST share the upstream driver version with nvidia-driver-${DRIVER_BRANCH}-open."
+    warn "FabricManager will abort with a version-mismatch error if installed as-is."
+    if [[ "$GATHER_ALLOW_DRIVER_SKEW" == "1" ]]; then
+        warn "GATHER_ALLOW_DRIVER_SKEW=1 — packaging anyway (forensic mode)."
+    else
+        warn ""
+        warn "Likely cause: NVIDIA repo had .${PIN_DRIVER_VER##*.} as the candidate for top-level packages"
+        warn "but apt-cache holds a stale candidate for the transitive sibling. Try:"
+        warn "  sudo rm -rf /var/lib/apt/lists/*nvidia* && sudo apt-get update && re-run gather-nvidia.sh"
+        warn ""
+        die "Refusing to package a bundle with driver-locked siblings at mixed versions. Set GATHER_ALLOW_DRIVER_SKEW=1 only after auditing the list above (full list at $_skew_log)."
+    fi
+else
+    rm -f "$_skew_log"
+    log "Driver-version skew: all driver-locked siblings match $PIN_DRIVER_VER."
+fi
+
 step "Pinned package sanity"
 _deb_has_pkg_version() {
     local want_pkg="$1" want_ver="${2:-}" deb pkg ver
@@ -598,7 +750,7 @@ for helper in install-nvidia.sh pre-install-nvidia.sh test-nvidia.sh; do
         chmod +x "$OUT_DIR/$helper"
         log "Bundled helper: $helper"
     else
-        warn "Helper not found at $SCRIPT_DIR/$helper — bundle will lack this file."
+        die "Required helper not found at $SCRIPT_DIR/$helper"
     fi
 done
 
@@ -645,7 +797,7 @@ printf '  scp "%s" "%s" \\\n         "%s" "%s" "%s" user@SERVER:~\n' \
     "$BUNDLE_PARENT/test-nvidia.sh"
 printf '  ssh user@SERVER\n'
 printf '  sudo bash pre-install-nvidia.sh   # readiness gate\n'
-printf '  sudo bash install-nvidia.sh       # installs driver+FM+NVLSM+CUDA+NCCL\n'
+printf '  sudo bash install-nvidia.sh       # installs driver+FM+NVLSM+CUDA (host NCCL only if SKIP_NCCL=0)\n'
 printf '  sudo reboot                       # required: load nvidia.ko + start FM\n'
 printf '  sudo bash test-nvidia.sh          # verify NVSwitch fabric Completed\n'
 printf '\n'

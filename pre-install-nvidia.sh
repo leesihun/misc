@@ -245,7 +245,14 @@ mlx5_loaded=$(lsmod 2>/dev/null | awk '$1 == "mlx5_core" {print $1}' )
 if [[ -n "$mlx5_loaded" ]]; then
     green_info N12 "mlx5_core loaded" "kernel module active"
 else
-    yel_warn N12 "mlx5_core loaded" "module not loaded; ConnectX RDMA inactive"
+    # If OFED is installed (N09 passed) but mlx5_core isn't loaded, peermem
+    # has nothing to bind to on the next boot — GPUDirect RDMA will silently
+    # fail. Caller can bypass with --ignore=N12B if they don't need RDMA.
+    if command -v ofed_info >/dev/null 2>&1; then
+        red_fail N12B "mlx5_core loaded (DOCA expected)" "OFED installed but mlx5_core not loaded; ConnectX RDMA inactive and nvidia-peermem will have no NIC to bind"
+    else
+        yel_warn N12 "mlx5_core loaded" "module not loaded; ConnectX RDMA inactive"
+    fi
 fi
 
 # ============================================================================
@@ -317,7 +324,7 @@ else
 fi
 
 # ============================================================================
-# N9. BUNDLE
+# N9. BUNDLE — presence + outer SHA256 + inner contract
 # ============================================================================
 _section "N9. Bundle file"
 
@@ -336,6 +343,87 @@ else
         fi
     else
         yel_warn N21 "bundle sha256 matches" "no .sha256 sidecar; skipping integrity check"
+    fi
+
+    # ── Inner bundle contract (peek inside the tarball — no extraction) ────
+    # Mirrors what pre-install-check.sh does for the userland bundle. Catches
+    # mis-built bundles (wrong OS, wrong variant, missing helpers, missing
+    # Packages index) BEFORE install-nvidia.sh extracts.
+    target_env=""
+    if target_env=$(tar -xzOf "$BUNDLE_PATH" --wildcards '*meta/target.env' 2>/dev/null | head -200); then
+        # N22 — variant guard.
+        if printf '%s\n' "$target_env" | grep -q '^BUNDLE_VARIANT=nvidia-stack$'; then
+            red_pass N22 "BUNDLE_VARIANT=nvidia-stack" "ok"
+        else
+            variant=$(printf '%s\n' "$target_env" | grep '^BUNDLE_VARIANT=' | cut -d= -f2)
+            red_fail N22 "BUNDLE_VARIANT=nvidia-stack" "found: '${variant:-<unset>}' — wrong bundle (the userland 'prepped' bundle goes through pre-install-check.sh, not this preflight)"
+        fi
+
+        # N23 — OS version matches target (we already know N01 said target is 24.04).
+        bundle_os=$(printf '%s\n' "$target_env" | grep '^BUNDLE_OS_VERSION=' | cut -d= -f2)
+        bundle_target_os=$(printf '%s\n' "$target_env" | grep '^BUNDLE_TARGET_OS=' | cut -d= -f2)
+        target_os="${VERSION_ID:-?}"
+        if [[ "$bundle_target_os" == "$target_os" || "$bundle_os" == "$target_os" ]]; then
+            red_pass N23 "bundle target OS matches" "${bundle_target_os:-$bundle_os} == $target_os"
+        else
+            red_fail N23 "bundle target OS matches" "bundle says target=${bundle_target_os:-?}, gather host=${bundle_os:-?}, but this server is $target_os — .deb compat will likely break"
+        fi
+
+        # N24 — bundle arch matches target.
+        bundle_arch=$(printf '%s\n' "$target_env" | grep '^BUNDLE_ARCH=' | cut -d= -f2)
+        target_arch=$(dpkg --print-architecture 2>/dev/null || echo unknown)
+        if [[ "$bundle_arch" == "$target_arch" ]]; then
+            red_pass N24 "bundle arch matches" "$bundle_arch"
+        else
+            red_fail N24 "bundle arch matches" "bundle=$bundle_arch target=$target_arch"
+        fi
+
+        # N25 — CUDA major.minor recorded (sanity check; the actual nvcc check
+        # happens in pre-install-check.sh after install).
+        bundle_cuda=$(printf '%s\n' "$target_env" | grep '^BUNDLE_CUDA=' | cut -d= -f2)
+        if [[ "$bundle_cuda" == "13.0" ]]; then
+            green_info N25 "bundle CUDA = 13.0" "$bundle_cuda"
+        elif [[ -n "$bundle_cuda" ]]; then
+            yel_warn N25 "bundle CUDA = 13.0" "bundle has CUDA=$bundle_cuda (expected 13.0)"
+        else
+            yel_warn N25 "bundle CUDA = 13.0" "BUNDLE_CUDA not recorded in meta/target.env"
+        fi
+
+        # Inventory: driver, FM, NCCL versions recorded by gather time.
+        for key in BUNDLE_DRIVER_VERSION BUNDLE_FABRICMANAGER_VERSION BUNDLE_NCCL_VERSION BUNDLE_DATE BUNDLE_GATHER_HOST; do
+            line=$(printf '%s\n' "$target_env" | grep "^${key}=" | head -1)
+            [[ -n "$line" ]] && green_info "G-${key}" "$key" "${line#*=}"
+        done
+    else
+        red_fail N22 "BUNDLE_VARIANT=nvidia-stack" "could not read meta/target.env from bundle — corrupt or wrong format"
+    fi
+
+    # N26 — debs/Packages index present in the tarball.
+    if tar -tzf "$BUNDLE_PATH" --wildcards '*debs/Packages' >/dev/null 2>&1; then
+        red_pass N26 "debs/Packages index present" "ok"
+    else
+        red_fail N26 "debs/Packages index present" "missing — install-nvidia.sh will need dpkg-scanpackages on the target"
+    fi
+
+    # N27 — helper scripts bundled inside.
+    helpers_missing=()
+    for helper in install-nvidia.sh pre-install-nvidia.sh test-nvidia.sh; do
+        if ! tar -tzf "$BUNDLE_PATH" --wildcards "*${helper}" >/dev/null 2>&1; then
+            helpers_missing+=( "$helper" )
+        fi
+    done
+    if (( ${#helpers_missing[@]} == 0 )); then
+        red_pass N27 "helper scripts bundled" "install-nvidia.sh + pre-install-nvidia.sh + test-nvidia.sh"
+    else
+        red_fail N27 "helper scripts bundled" "missing: ${helpers_missing[*]}"
+    fi
+
+    # N28 — inner SHA256SUMS exists. Actual hash verification happens at
+    # install time after extraction (see install-nvidia.sh step 1b).
+    if tar -tzf "$BUNDLE_PATH" --wildcards '*meta/SHA256SUMS' >/dev/null 2>&1; then
+        red_pass N28 "meta/SHA256SUMS present" "ok (install-nvidia.sh will verify after extract)"
+    else
+        yel_warn N28 "meta/SHA256SUMS present" "missing — install-nvidia.sh cannot integrity-check the extracted bundle"
     fi
 fi
 

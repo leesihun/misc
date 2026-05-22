@@ -305,7 +305,7 @@ if [[ -n "$NVCC_BIN" ]]; then
         red_fail R10 "nvcc on PATH, 13.0.x" "found: ${NVCC_VER:-?} at $NVCC_BIN (need 13.0)"
     fi
 else
-    red_fail R10 "nvcc on PATH, 13.0.x" "nvcc not found on PATH or under /usr/local/cuda* — install-nvidia.sh did not install cuda-toolkit-13-0?"
+    red_fail R10 "nvcc on PATH, 13.0.x" "nvcc not found on PATH or under /usr/local/cuda* — install-nvidia.sh did not install cuda-nvcc-13-0 (or /etc/profile.d/cuda.sh missing)?"
 fi
 
 # R12 cuBLAS / cuDNN headers (need to BUILD extensions; runtime is shipped by wheels)
@@ -316,7 +316,7 @@ done
 if (( HDR_OK )); then
     red_pass R12 "cuBLAS headers present" "$h"
 else
-    red_fail R12 "cuBLAS headers present" "cublas_v2.h not found — cuda-cudart-dev-13-0 / cuda-toolkit-13-0 missing?"
+    red_fail R12 "cuBLAS headers present" "cublas_v2.h not found — libcublas-dev-13-0 / cuda-cudart-dev-13-0 missing?"
 fi
 
 # R13 CUDA smoke test: compile + run a 10-line vector-add against sm_103
@@ -387,19 +387,33 @@ fi
 
 # R16 Fabric State = Completed for all GPUs
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    fab_states=$(nvidia-smi -q 2>/dev/null | grep -E 'Fabric\s*$|^\s+State\s*:' | grep -A1 'Fabric' | grep 'State' | awk -F: '{print $2}' | sort -u | xargs)
-    if [[ -z "$fab_states" ]]; then
-        # newer nvidia-smi: "Fabric State: Completed" on one line
-        fab_states=$(nvidia-smi -q 2>/dev/null | grep -E '^\s+Fabric State' | awk -F: '{print $2}' | sort -u | xargs)
-    fi
-    if [[ "$fab_states" =~ ^[[:space:]]*Completed[[:space:]]*$ ]] \
-       || [[ "$fab_states" =~ ^[[:space:]]*Success[[:space:]]*$ ]]; then
-        red_pass R16 "fabric.state = Completed" "$fab_states"
-    elif [[ -z "$fab_states" ]]; then
-        # single-GPU or no fabric — won't apply here but be defensive
+    fab_states=$(nvidia-smi -q 2>/dev/null | awk '
+        /^[[:space:]]+(GPU[[:space:]]+)?Fabric[[:space:]]*$/ {
+            in_fabric = 1; captured = 0; next
+        }
+        in_fabric && !captured && /^[[:space:]]+State[[:space:]]*:/ {
+            v = $0; sub(/.*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+            print v
+            captured = 1; in_fabric = 0; next
+        }
+        in_fabric && /^[[:space:]]+[A-Z][A-Za-z0-9 ]*[[:space:]]*$/ {
+            in_fabric = 0
+        }
+        /^[[:space:]]+Fabric[[:space:]]+State[[:space:]]*:/ {
+            v = $0; sub(/.*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+            print v
+        }
+    ')
+    fab_total=$(printf '%s\n' "$fab_states" | grep -c . || true)
+    fab_ok=$(printf '%s\n' "$fab_states" | grep -cE '^(Completed|Success)$' || true)
+    if (( fab_total == 0 )); then
         red_fail R16 "fabric.state = Completed" "Fabric State not reported; expected Completed on 8x B300"
+    elif (( GPU_COUNT > 0 && fab_total != GPU_COUNT )); then
+        red_fail R16 "fabric.state = Completed" "matched $fab_total Fabric entries for $GPU_COUNT GPU(s) ($fab_ok Completed/Success)"
+    elif (( fab_ok == fab_total )); then
+        red_pass R16 "fabric.state = Completed" "$fab_ok/$fab_total Completed/Success"
     else
-        red_fail R16 "fabric.state = Completed" "states: $fab_states (mixed/incomplete — #1 cause of CUDA Error 802)"
+        red_fail R16 "fabric.state = Completed" "$fab_ok/$fab_total Completed/Success - common cause of CUDA Error 802"
     fi
 else
     red_fail R16 "fabric.state = Completed" "nvidia-smi missing"
@@ -663,11 +677,14 @@ else
 fi
 
 # Y07 NVIDIA apt source presence (informational)
-if compgen -G '/etc/apt/sources.list.d/cuda*.list' >/dev/null \
+if [[ -f /etc/apt/sources.list.d/00-nvidia-bundle.list ]] \
+   && grep -qs 'file:///var/tmp/airgap-nvidia-debs' /etc/apt/sources.list.d/00-nvidia-bundle.list; then
+    yel_pass Y07 "NVIDIA bundle apt source present" "file:///var/tmp/airgap-nvidia-debs"
+elif compgen -G '/etc/apt/sources.list.d/cuda*.list' >/dev/null \
    || grep -Rqs 'developer.download.nvidia.com' /etc/apt/sources.list.d/ 2>/dev/null; then
-    yel_pass Y07 "NVIDIA apt source present" "will pin to origin=NVIDIA"
+    yel_warn Y07 "NVIDIA online apt source present" "target should use install-nvidia.sh's file:// bundle source"
 else
-    yel_warn Y07 "NVIDIA apt source present" "not found — install-nvidia.sh registers /etc/apt/sources.list.d/00-nvidia-bundle.list"
+    yel_warn Y07 "NVIDIA bundle apt source present" "not found - install-nvidia.sh registers /etc/apt/sources.list.d/00-nvidia-bundle.list"
 fi
 
 # Y08 hostname resolves
