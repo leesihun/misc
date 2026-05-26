@@ -14,7 +14,8 @@
 #     - nvidia-driver-580-open + open kmod stack (incl. nvidia-peermem.ko,
 #       nvidia-persistenced — both ride transitively, no separate apt pkg)
 #     - cuda-drivers-580 plus the matching fabricmanager/NSCQ packages
-#     - nvlsm (4th-gen NVSwitch — runs as a child of nvidia-fabricmanager)
+#     - nvlsm (NVLink subnet manager — required for 4th-gen NVSwitch routing;
+#       deb ships no systemd unit, install-nvidia.sh lays one down)
 #     - nvidia-modprobe
 #     - CUDA toolkit MINIMAL subset (NOT cuda-toolkit-13-0 metapkg, which
 #       drags ~3 GB of cuFFT/cuSPARSE/NPP/nvJPEG that install-nvidia.sh
@@ -402,9 +403,9 @@ NV_PKGS=(
     #   - cuda / cuda-${MAJOR}-${MINOR}      — pulls the driver again
     #   - cuda-toolkit-${MAJOR}-${MINOR}     — ~3 GB metapkg with cuFFT/cuSPARSE/
     #                                          NPP/nvJPEG that install-nvidia.sh
-    #                                          never installs (PyTorch/vLLM
-    #                                          venvs ship their own runtime via
-    #                                          pip nvidia-*-cu13 packages).
+    #                                          never installs (the training venv's
+    #                                          PyTorch wheel ships its own runtime
+    #                                          via pip nvidia-*-cu13 packages).
     # This list matches the CORE_PKGS / CUDA_PKGS arrays in install-nvidia.sh
     # — keep them in lockstep. The dependency closure step below still pulls
     # the transitive runtime libs (libcudart12, etc.) so headers + shared

@@ -2,10 +2,10 @@
 # ============================================================================
 # install-all.sh  (userland launcher)
 #
-#   Drives the install-all.d/NN-name.sh step scripts in numeric order.
-#   Each step is independently runnable (just invoke `bash install-all.d/NN-...sh`);
-#   this launcher exists for the common "do everything from a clean target"
-#   path plus partial re-runs after a failed step.
+#   Drives the step functions defined in install-all-steps.sh (sourced).
+#   The split-file install-all.d/ layout was collapsed into one file so the
+#   airgap operator only has to transfer ONE script to the target alongside
+#   install-all.sh (FTP one-by-one transfer ergonomics).
 #
 #   Full target sequence (unchanged from the previous monolithic installer):
 #     1. sudo bash pre-install-nvidia.sh        # NVIDIA bundle readiness
@@ -25,7 +25,7 @@
 #     sudo bash install-all.sh --force          # ignore .ok markers, re-run everything
 #     sudo bash install-all.sh --skip-preflight # skip step 01's pre-install-check.sh
 #
-#   Env knobs (all honored by every step script):
+#   Env knobs (all honored by every step function):
 #     BUNDLE_DIR, BUNDLE_BIN, PYTHON_VER, SCRATCH_ROOT
 #     INSTALL_INFERENCE, INSTALL_TRAINING, INSTALL_JUPYTER, INSTALL_LLAMA
 #     INSTALL_DESKTOP  (inference venv is CPU-only — no INSTALL_VLLM knob)
@@ -40,14 +40,14 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STEPS_DIR_REPO="$SCRIPT_DIR/install-all.d"
-[[ -d "$STEPS_DIR_REPO" ]] \
-    || { echo "[install] install-all.d/ not found next to $0" >&2; exit 1; }
+STEPS_FILE="$SCRIPT_DIR/install-all-steps.sh"
+[[ -r "$STEPS_FILE" ]] \
+    || { echo "[install] install-all-steps.sh not found next to $0" >&2; exit 1; }
 
-# Generate (and export) RUN_ID so every child step shares one log dir.
+# Generate (and export) RUN_ID so every step subshell shares one log dir.
 export RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 # shellcheck disable=SC1091
-source "$STEPS_DIR_REPO/00-common.sh"
+source "$STEPS_FILE"
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 MODE="all"
@@ -58,7 +58,7 @@ FORCE_ALL=0
 SKIP_PREFLIGHT_ARG=0
 
 usage() {
-    sed -n '2,32p' "$0"
+    sed -n '2,38p' "$0"
 }
 
 while (( $# > 0 )); do
@@ -81,25 +81,19 @@ done
 (( FORCE_ALL ))         && export FORCE=1
 
 # ── Step enumeration ────────────────────────────────────────────────────────
-discover_steps() {
-    # Returns step basenames in numeric order (00-common excluded).
-    shopt -s nullglob
-    for f in "$STEPS_DIR_REPO"/[0-9][0-9]-*.sh; do
-        [[ "$(basename "$f")" == "00-common.sh" ]] && continue
-        basename "$f" .sh
-    done
-    shopt -u nullglob
-}
+# ALL_STEPS is defined in install-all-steps.sh (the sourced library).
+(( ${#ALL_STEPS[@]} > 0 )) || die "ALL_STEPS array is empty — install-all-steps.sh is malformed"
 
-STEP_LIST=()
-while IFS= read -r s; do STEP_LIST+=( "$s" ); done < <(discover_steps)
-(( ${#STEP_LIST[@]} > 0 )) || die "No step scripts found in $STEPS_DIR_REPO"
+# Map a step name like "14-llamacpp-build" to its function name "step_14_llamacpp_build".
+_step_func_name() {
+    printf 'step_%s\n' "${1//-/_}"
+}
 
 # Resolve a user-supplied step token ("14" or "14-llamacpp-build") to a
 # full step name; fail if none/multiple match.
 resolve_step() {
-    local needle="$1" hit
-    for s in "${STEP_LIST[@]}"; do
+    local needle="$1" s
+    for s in "${ALL_STEPS[@]}"; do
         if [[ "$s" == "$needle" || "$s" == "${needle}-"* ]]; then
             echo "$s"; return 0
         fi
@@ -112,7 +106,7 @@ print_step_status() {
     local s status
     printf '\n%-30s %-10s %s\n' "STEP" "STATUS" "LOG"
     printf '%-30s %-10s %s\n' "----" "------" "---"
-    for s in "${STEP_LIST[@]}"; do
+    for s in "${ALL_STEPS[@]}"; do
         if [[ -f "$STEPS_DIR/${s}.ok" ]];     then status="ok"
         elif [[ -f "$STEPS_DIR/${s}.failed" ]]; then status="FAILED"
         else                                       status="pending"
@@ -120,7 +114,7 @@ print_step_status() {
         printf '%-30s %-10s %s\n' "$s" "$status" "$RUN_LOG_DIR/${s}.log"
     done
     printf '\nLatest run-id: %s\n' "$RUN_ID"
-    printf 'State dir    : %s\n' "$STATE_DIR"
+    printf 'State dir    : %s\n' "$STEPS_DIR"
     printf 'Log dir      : %s\n\n' "$LOG_ROOT"
 }
 
@@ -167,7 +161,7 @@ fi
 TO_RUN=()
 case "$MODE" in
     all)
-        for s in "${STEP_LIST[@]}"; do TO_RUN+=( "$s" ); done ;;
+        for s in "${ALL_STEPS[@]}"; do TO_RUN+=( "$s" ); done ;;
     one)
         if step=$(resolve_step "$ONE_STEP"); then
             TO_RUN=( "$step" )
@@ -179,7 +173,7 @@ case "$MODE" in
     from)
         if step=$(resolve_step "$FROM_STEP"); then
             local_started=0
-            for s in "${STEP_LIST[@]}"; do
+            for s in "${ALL_STEPS[@]}"; do
                 if [[ "$s" == "$step" ]]; then local_started=1; fi
                 (( local_started )) && TO_RUN+=( "$s" )
             done
@@ -188,11 +182,16 @@ case "$MODE" in
         fi ;;
 esac
 
-# Honor resume marker: skip 03-05 if Stage 1 already ran.
+# Honor resume marker: skip 03-05 if Stage 1 already ran. Suppressed when
+# the operator explicitly asked for a single step (`--run NN`) — they have
+# already cleared its .ok/.failed markers and clearly intend to re-execute
+# even if the resume marker says it ran before.
 RESUMING=0
-if [[ -f "$RESUME_MARKER" ]]; then
+if [[ -f "$RESUME_MARKER" && "$MODE" != "one" ]]; then
     RESUMING=1
     log "Resume marker present ($RESUME_MARKER) — skipping steps 03-05."
+elif [[ -f "$RESUME_MARKER" && "$MODE" == "one" ]]; then
+    log "Resume marker present ($RESUME_MARKER) but --run was given; honoring explicit re-run request."
 fi
 
 # ── Drive each step ─────────────────────────────────────────────────────────
@@ -227,17 +226,25 @@ for step in "${TO_RUN[@]}"; do
     fi
 
     log "─── running $step ───"
+    func_name=$(_step_func_name "$step")
+    if ! declare -F "$func_name" >/dev/null 2>&1; then
+        FAILED+=( "$step" )
+        OVERALL_RC=2
+        log "Step $step has no function '$func_name' in install-all-steps.sh — refusing to skip silently."
+        break
+    fi
     rc=0
-    bash "$STEPS_DIR_REPO/${step}.sh" || rc=$?
+    # Subshell isolation: init_step's `exec > >(tee)` redirect, ERR/EXIT
+    # traps, and any die/checkpoint_reboot `exit` are scoped here only.
+    ( "$func_name" ) || rc=$?
 
     if (( rc == 0 )); then
         EXECUTED+=( "$step" )
     elif (( rc == 75 )); then
-        # Distinguished code: any step that called checkpoint_reboot() in
-        # 00-common.sh, or step 05's legacy Stage-1 reboot, or step 17's
-        # /run/reboot-required gate. Always treated the same way — the step
-        # already wrote its .ok marker, so re-running install-all.sh after
-        # the reboot will resume at the next pending step.
+        # Distinguished code: any step that called checkpoint_reboot, or step
+        # 05's legacy Stage-1 reboot path. The step already wrote its .ok
+        # marker, so re-running install-all.sh after the reboot will resume
+        # at the next pending step.
         log "Step $step requested a reboot (exit 75)."
         EXECUTED+=( "$step" )
         REBOOT_REQUESTED=1

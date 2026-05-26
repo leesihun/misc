@@ -133,7 +133,7 @@ Plus the full transitive .deb closure via `apt-rdepends`. Bundle size: **~2?? GB
 | `/var/tmp/airgap-nvidia-debs/` | Local `file://` apt repo (NVIDIA bundle's debs/) |
 | `/etc/apt/sources.list.d/00-nvidia-bundle.list` | `deb [trusted=yes] file:///var/tmp/airgap-nvidia-debs ./` |
 | `/etc/apt/preferences.d/99-nvidia-prefer-bundle` | Priority 1001 for `nvidia-*` / `cuda-*` / `libnvidia-*` / `libnvjit*` / `libnvfat*` / `libnccl*` / `nvlsm` / `datacenter-gpu-manager-*` (libnccl matters only for explicit `SKIP_NCCL=0`) |
-| `apt-mark hold` | Applied to every installed `nvidia-driver-*`, `nvidia-fabricmanager-*`, `nvidia-persistenced`, `libnvidia-*`, `cuda-drivers`, `cuda-nvcc-*`, `cuda-cudart-*`, `cuda-cccl-*`, `cuda-compat-*`, `libcublas-*`, `libnvjitlink-*`, `libnccl*`, `nvlsm`, `nvidia-modprobe`, `datacenter-gpu-manager-*` package. Userland installer (install-all.d/03-apt-repo.sh) only adds holds on the system runtime libs (libstdc++6/libgcc-s1/libgomp1/libc6). |
+| `apt-mark hold` | Applied to every installed `nvidia-driver-*`, `nvidia-fabricmanager-*`, `nvidia-persistenced`, `libnvidia-*`, `cuda-drivers`, `cuda-nvcc-*`, `cuda-cudart-*`, `cuda-cccl-*`, `cuda-compat-*`, `libcublas-*`, `libnvjitlink-*`, `libnccl*`, `nvlsm`, `nvidia-modprobe`, `datacenter-gpu-manager-*` package. Userland installer (`step_03_apt_repo` in install-all-steps.sh) only adds holds on the system runtime libs (libstdc++6/libgcc-s1/libgomp1/libc6). |
 | `/var/lib/install-nvidia/nvidia-held.txt` | Manifest of NVIDIA packages held |
 | `/etc/profile.d/cuda.sh` | nvcc on PATH for login shells (written by install-nvidia.sh step 5b; does NOT modify LD_LIBRARY_PATH on purpose) |
 | `/etc/ld.so.conf.d/cuda-system.conf` | `/usr/local/cuda/lib64` added to ld.so cache so non-RPATH binaries (llama-cli / llama-server) find `libcudart.so.13` (written by install-nvidia.sh step 5b; searched AFTER RUNPATH so PyTorch/vLLM venv-bundled CUDA libs still win) |
@@ -142,10 +142,10 @@ Plus the full transitive .deb closure via `apt-rdepends`. Bundle size: **~2?? GB
 
 | Unit | Purpose |
 |------|---------|
-| `nvidia-fabricmanager.service` | NVSwitch routing config + spawns NVLSM daemon as child process |
+| `nvidia-fabricmanager.service` | NVSwitch routing config; on the current R580/NVL5+ package set its wrapper starts/manages the NVLSM daemon |
 | `nvidia-persistenced.service` | Persistence mode (no init cost between job runs) |
 | `nvidia-dcgm.service` | DCGM telemetry / health monitoring |
-| `nvidia-nvlsm.service` | NVLink Subnet Manager. **NVLSM is MANDATORY on B300** (4th-gen NVSwitch needs it for SHARP). On most R580 builds it ships as a separate unit and `install-nvidia.sh` enables it; on a few it spawns as a child of `nvidia-fabricmanager` instead, in which case `pgrep -x nvlsm` is the authoritative liveness check (used by `test-nvidia.sh`). Either way the process MUST be running. |
+| `nvidia-nvlsm.service` | Must not be created by this installer on the current R580/NVL5+ package set. A legacy custom unit races Fabric Manager's own NVLSM wrapper; `pgrep -x nvlsm` is the authoritative liveness check used by `test-nvidia.sh`. |
 
 ### 0.4 Kernel / modules
 
@@ -163,7 +163,7 @@ Plus the full transitive .deb closure via `apt-rdepends`. Bundle size: **~2?? GB
 
 ### 0.6 Reboot
 
-install-nvidia.sh exits asking for a reboot. `nvidia.ko` loads on next boot; FM/NVLSM initialize the NVSwitch fabric automatically via the enabled systemd units. Run `test-nvidia.sh` after the reboot to verify all 8 GPUs report Fabric State = Completed.
+install-nvidia.sh exits asking for a reboot. `nvidia.ko` loads on next boot; `ib_umad` autoloads for NVLSM/OpenSM, then Fabric Manager starts/manages NVLSM and initializes the NVSwitch fabric. Run `test-nvidia.sh` after the reboot to verify all 8 GPUs report Fabric State = Completed.
 
 ### 0.7 What install-nvidia.sh does NOT touch
 
@@ -174,34 +174,44 @@ install-nvidia.sh exits asking for a reboot. `nvidia.ko` loads on next boot; FM/
 
 ---
 
-## 0.8 Userland install steps (`install-all.d/`)
+## 0.8 Userland install steps (`install-all-steps.sh`)
 
-`install-all.sh` is now a thin launcher (~250 lines). The real work lives in
-`install-all.d/NN-name.sh` — 17 standalone, directly-runnable step scripts
-plus one shared helpers file. Each step writes its own log
-(`/var/log/install-all/<RUN_ID>/NN-name.log`) and status marker
-(`/var/lib/install-all/steps/NN-name.{ok,failed}`).
+`install-all.sh` is a thin launcher (~260 lines). The real work lives in
+`install-all-steps.sh` — a single ~1660-line library sourced by the launcher.
+It contains the shared helpers (formerly `00-common.sh`), the ordered
+`ALL_STEPS` array, and 17 step functions (`step_01_preflight` …
+`step_17_final_status`). The launcher dispatches each step in a subshell
+(`( step_NN_name )`) so the per-step ERR/EXIT traps and the `exec > >(tee)`
+log redirect set by `init_step` are scoped correctly.
 
-| # | Script | Concern |
-|---|--------|---------|
-| 00 | `install-all.d/00-common.sh` | Sourced by every step. Helpers (log/warn/die/step), step lifecycle (`init_step`/`mark_step_ok`), traps, apt helpers (`_apt_install`, `_pkg_satisfied`, `_normalize_pkg_name` t64 mapping), wheelhouse helpers, `_as_user` (drop to SUDO_USER), bundle metadata sourcing (incl. nvidia bundle's `meta/target.env` → CUDA_MAJOR/MINOR), env-knob defaults. Not executed. |
-| 01 | `01-preflight.sh` | Re-exec under sudo, bundle locate + SHA256 + extract, variant guard (`BUNDLE_VARIANT=prepped`), runs `pre-install-check.sh`. |
-| 02 | `02-scratch.sh` | `$SCRATCH_ROOT` directory creation + chown. |
-| 03 | `03-apt-repo.sh` | System-lib holds, local file:// apt repo, `apt-get update`. **No NVIDIA pin** (install-nvidia.sh's pin already covers nvidia packages and points at the bundle); **no nvidia-* hold** (install-nvidia.sh already holds them). |
-| 04 | `04-apt-plan.sh` | `apt -s` dry-run; refuses if a kernel/firmware/microcode upgrade is detected (unless `FORCE=1`); writes proposed/triggers files for step 05. |
-| 05 | `05-reboot-trigger-packages.sh` | If step 04 found libc6/systemd/dbus upgrades, installs them only, writes `/var/lib/install-all-prepped/stage1.done`, exits 75 (launcher renders reboot prompt). |
-| 06 | `06-apt-userland.sh` | Toolchain, `python${PYTHON_VER}-venv/dev`, needrestart, CLI tools, GUI runtime libs, scientific libs (incl. libssl-dev for llama.cpp OpenSSL HTTP), optional xfce4+xrdp+lightdm. |
-| 07 | `07-app-debs.sh` | VS Code + Chrome `.deb` install via `apt install ./`, AppArmor reload, `kernel.apparmor_restrict_unprivileged_userns=0` sysctl. |
-| 08 | `08-tarball-apps.sh` | Firefox, Node.js, Bun, Opencode (tarballs). `needrestart -r a`. |
-| 09 | `09-desktop-xrdp.sh` | xrdp startwm → `startxfce4`, polkit shutdown rules, UFW 3389. Honors `INSTALL_DESKTOP`. |
-| 10 | `10-wheelhouse-manifests.sh` | `generate_wheelhouse_requirements` — emits per-wheelhouse `requirements.txt`. |
-| 11 | `11-venv-inference.sh` | **CPU-only** inference venv at `$INFERENCE_PREFIX/venv` — FastAPI + langchain + sentence-transformers + RAG stack. **No torch, no vLLM** (both removed; multi-GPU NCCL ABI footgun). Honors `INSTALL_INFERENCE`. GPU inference is the llama.cpp HTTP server (step 14). |
-| 12 | `12-venv-training.sh` | Training venv — torch (cu130), torch-geometric + extensions (pyg_lib, scatter, sparse, cluster; torch_spline_conv unavailable on cu130), SciPy stack. |
-| 13 | `13-venv-jupyter.sh` | JupyterLab venv, ipykernel registration, `~/start-jupyter.sh` launcher. |
-| 14 | `14-llamacpp-build.sh` | llama.cpp build. cmake flags: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. Drops deprecated `LLAMA_CURL`. NCCL link-time auto-disabled because `SKIP_NCCL=1` is the install-nvidia.sh default (intentional). |
-| 15 | `15-system-tuning.sh` | sysctl (vm.overcommit, swappiness, max_map_count, net buffers), THP=madvise via `disable-thp-defrag.service`, pam_limits. Refuses to write `/etc/systemd/system.conf.d/*` (see notes in step 15 about unit mismatch). |
-| 16 | `16-operational-tooling.sh` | `/usr/local/bin/gpu-health-check`, `/usr/local/bin/llama-server-multigpu`, `/usr/local/bin/llama-model-preload`, `/etc/systemd/system/llama-server@.service`, `/etc/llama-server/example.env`. |
-| 17 | `17-final-status.sh` | Clears resume marker, `chown -R $SCRATCH_ROOT`, prints final banner. (Launcher also prints aggregate summary across the run.) |
+The split-file `install-all.d/` layout was collapsed into this single file
+for FTP one-by-one transfer ergonomics (the airgap target now needs 5 small
+helper scripts + 1 .bin + 1 .sha256, no nested directory to ship).
+
+Each step still writes its own log (`/var/log/install-all/<RUN_ID>/NN-name.log`)
+and status marker (`/var/lib/install-all/steps/NN-name.{ok,failed}`). To run
+a single step interactively: `sudo bash install-all.sh --run NN`.
+
+| # | Function | Concern |
+|---|----------|---------|
+| — | (helpers) | Shared helpers at the top of `install-all-steps.sh`: log/warn/die/step, step lifecycle (`init_step`/`mark_step_ok`/`checkpoint_reboot`), ERR/EXIT traps, apt helpers (`_apt_install`, `_pkg_satisfied`, `_normalize_pkg_name` t64 mapping), wheelhouse helpers, `_as_user` (drop to SUDO_USER), bundle metadata sourcing (incl. nvidia bundle's `meta/target.env` → CUDA_MAJOR/MINOR), env-knob defaults. |
+| 01 | `step_01_preflight` | Bundle locate + SHA256 + extract, variant guard (`BUNDLE_VARIANT=prepped`), runs `pre-install-check.sh`. |
+| 02 | `step_02_scratch` | `$SCRATCH_ROOT` directory creation + chown. |
+| 03 | `step_03_apt_repo` | System-lib holds, local file:// apt repo, `apt-get update`. **No NVIDIA pin** (install-nvidia.sh's pin already covers nvidia packages and points at the bundle); **no nvidia-* hold** (install-nvidia.sh already holds them). |
+| 04 | `step_04_apt_plan` | `apt -s` dry-run. **STRICT** base-OS gate: any libc6/systemd/dbus/kernel/firmware/microcode upgrade trigger is a hard FAIL (no `FORCE=1` escape). |
+| 05 | `step_05_reboot_trigger_packages` | **Strict no-op asserter.** If step 04 emitted any triggers, refuse — under the strict gate this branch should never fire. Kept for back-compat with the `$RESUME_MARKER` mechanism. |
+| 06 | `step_06_apt_userland` | Toolchain, `python${PYTHON_VER}-venv/dev`, needrestart, CLI tools, GUI runtime libs, scientific libs (incl. libssl-dev for llama.cpp OpenSSL HTTP), optional xfce4+xrdp+lightdm. **`checkpoint_reboot`** at end. |
+| 07 | `step_07_app_debs` | VS Code + Chrome `.deb` install via `apt install ./`, AppArmor reload, `kernel.apparmor_restrict_unprivileged_userns=0` sysctl. |
+| 08 | `step_08_tarball_apps` | Firefox, Node.js, Bun, Opencode (tarballs). `needrestart -r a`. **`checkpoint_reboot`** at end. |
+| 09 | `step_09_desktop_xrdp` | xrdp startwm → `startxfce4`, polkit shutdown rules, UFW 3389. Honors `INSTALL_DESKTOP`. **`checkpoint_reboot`** at end. |
+| 10 | `step_10_wheelhouse_manifests` | `generate_wheelhouse_requirements` — emits per-wheelhouse `requirements.txt`. |
+| 11 | `step_11_venv_inference` | **CPU-only** inference venv at `$INFERENCE_PREFIX/venv` — FastAPI + langchain + sentence-transformers + RAG stack. **No torch, no vLLM** (both removed; multi-GPU NCCL ABI footgun). Honors `INSTALL_INFERENCE`. GPU inference is the llama.cpp HTTP server (step 14). |
+| 12 | `step_12_venv_training` | Training venv — torch (cu130), torch-geometric + extensions (pyg_lib, scatter, sparse, cluster; torch_spline_conv unavailable on cu130), SciPy stack. |
+| 13 | `step_13_venv_jupyter` | JupyterLab venv, ipykernel registration, `~/start-jupyter.sh` launcher. |
+| 14 | `step_14_llamacpp_build` | llama.cpp build. cmake flags: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. Drops deprecated `LLAMA_CURL`. NCCL link-time auto-disabled because `SKIP_NCCL=1` is the install-nvidia.sh default (intentional). |
+| 15 | `step_15_system_tuning` | sysctl (vm.overcommit, swappiness, max_map_count, net buffers), THP=madvise via `disable-thp-defrag.service`, pam_limits. Refuses to write `/etc/systemd/system.conf.d/*` (see notes in the function about unit mismatch). **`checkpoint_reboot`** at end. |
+| 16 | `step_16_operational_tooling` | `/usr/local/bin/gpu-health-check`, `/usr/local/bin/llama-server-multigpu`, `/usr/local/bin/llama-model-preload`, `/etc/systemd/system/llama-server@.service`, `/etc/llama-server/example.env`. |
+| 17 | `step_17_final_status` | Clears resume marker, `chown -R $SCRATCH_ROOT`, prints final banner. **`checkpoint_reboot`** (final cold-boot sanity reboot). |
 
 The launcher (`install-all.sh`) supports:
 - `--list` — show step status for the current `RUN_ID`
@@ -551,7 +561,7 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | Path | What |
 |------|------|
 | `/var/lib/install-all/steps/NN-name.ok` | Step success marker. Written by `mark_step_ok` in each step script; the launcher (`install-all.sh`) consults these to skip already-completed steps on re-run. |
-| `/var/lib/install-all/steps/NN-name.failed` | Step failure marker. Written by the EXIT trap in `00-common.sh` when a step exits non-zero. Step 17 / launcher report the first failed step by name. |
+| `/var/lib/install-all/steps/NN-name.failed` | Step failure marker. Written by the EXIT trap in `install-all-steps.sh` (`_step_on_exit`) when a step exits non-zero (excluding exit 75, the `checkpoint_reboot` distinguished code). Launcher reports the first failed step by name. |
 | `/var/lib/install-all/apt-requested.txt` | Step 04 dumps the apt-get install list (after t64 normalization) |
 | `/var/lib/install-all/apt-proposed.txt` | Step 04 dumps every `(Inst|Conf)` line from `apt -s` simulation |
 | `/var/lib/install-all/apt-reboot-triggers.txt` | Step 04 dumps reboot-triggering packages (libc6/systemd/dbus, +DKMS-danger if FORCE=1); step 05 reads this to decide whether to run Stage 1 |

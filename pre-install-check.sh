@@ -647,6 +647,16 @@ else
         fi
         (( is_danger )) || continue
 
+        # Sanity-check the bundle version is well-formed BEFORE sort -V can
+        # silently fail on it. A malformed entry (e.g. a corrupt Packages
+        # index) would otherwise pass through the safe branch and bypass
+        # the strict gate. Require a leading digit; debian-style versions
+        # ([epoch:]upstream[-revision]) all start with one.
+        if [[ ! "$bv" =~ ^[0-9] ]]; then
+            danger_hits+=$'\n'"  $bp: bundle version '$bv' is not a parseable Debian version — Packages index corrupt?"
+            continue
+        fi
+
         # Compare with installed version (if any). If not installed at all,
         # apt may pull it as a NEW dep — also a base-OS change, so flag it.
         installed_ver=$(dpkg-query -W -f='${Version}' "$bp" 2>/dev/null || true)
@@ -660,6 +670,10 @@ else
                     danger_hits+=$'\n'"  $bp: bundle=$bv > installed=$installed_ver"
                 fi
             fi
+            # else: installed > bundle (downgrade direction). Safe by
+            # design — apt won't downgrade these (they're held by step 03,
+            # and even if they weren't, --allow-downgrades is not in the
+            # userland step's _apt_install* helpers). Nothing to record.
         fi
     done <<<"$bundle_pairs"
 

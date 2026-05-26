@@ -305,6 +305,16 @@ else
     fi
 fi
 
+# nvidia-peermem requires the RDMA peer-memory API from the active ib_core.
+# Ubuntu inbox RDMA can load mlx5_core successfully but still lack these
+# exports, producing "Unknown symbol ib_register_peer_memory_client" later.
+if grep -qw 'ib_register_peer_memory_client' /proc/kallsyms 2>/dev/null \
+        && grep -qw 'ib_unregister_peer_memory_client' /proc/kallsyms 2>/dev/null; then
+    red_pass N12C "RDMA peer-memory symbols" "ib_register_peer_memory_client exports present"
+else
+    red_fail N12C "RDMA peer-memory symbols" "missing ib_register_peer_memory_client/ib_unregister_peer_memory_client in active ib_core; nvidia-peermem will fail with Unknown symbol. Install/repair DOCA-OFED first, then install/rebuild NVIDIA."
+fi
+
 # ============================================================================
 # N6. NO CONFLICTING NVIDIA INSTALL ALREADY
 # ============================================================================

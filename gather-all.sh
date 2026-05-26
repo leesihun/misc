@@ -1088,22 +1088,22 @@ for helper in install-all.sh pre-install-check.sh test-all.sh; do
     fi
 done
 
-# Bundle the install-all.d/ step scripts. The launcher install-all.sh sources
-# 00-common.sh from this dir and invokes 01-..17- in order; without these the
-# launcher exits immediately on the target.
-if [[ -d "$SCRIPT_DIR/install-all.d" ]]; then
-    rm -rf "$OUT_DIR/install-all.d"
-    cp -r "$SCRIPT_DIR/install-all.d" "$OUT_DIR/install-all.d"
-    find "$OUT_DIR/install-all.d" -name '*.sh' -exec chmod +x {} +
-    log "Bundled helper dir: install-all.d/ ($(ls "$OUT_DIR/install-all.d" | wc -l) files)"
+# Bundle install-all-steps.sh — the single consolidated library that
+# install-all.sh sources. Replaces the old install-all.d/ tree (which had
+# 18 files), so the airgap operator only has to transfer ONE script next
+# to install-all.sh.
+if [[ -f "$SCRIPT_DIR/install-all-steps.sh" ]]; then
+    cp "$SCRIPT_DIR/install-all-steps.sh" "$OUT_DIR/install-all-steps.sh"
+    chmod +x "$OUT_DIR/install-all-steps.sh"
+    log "Bundled helper: install-all-steps.sh ($(wc -l < "$OUT_DIR/install-all-steps.sh" | tr -d ' ') lines)"
 else
-    die "install-all.d/ not found at $SCRIPT_DIR — cannot ship a bundle without the step scripts."
+    die "install-all-steps.sh not found at $SCRIPT_DIR — cannot ship a bundle without the step library."
 fi
 
 log "Generating SHA256 manifest (excluding meta/SHA256SUMS itself)"
 (
     cd "$OUT_DIR"
-    find install-all.sh install-all.d pre-install-check.sh test-all.sh debs apps wheels requirements src meta \
+    find install-all.sh install-all-steps.sh pre-install-check.sh test-all.sh debs apps wheels requirements src meta \
         -type f \
         ! -path 'meta/SHA256SUMS' \
         -print0 2>/dev/null \
@@ -1124,16 +1124,11 @@ log "Generating bundle SHA256 sidecar"
 # transfer the bundle + .sha256 + these scripts (the bundle ALSO carries
 # them, but having them sibling lets users invoke pre-install-check.sh
 # without first extracting).
-for helper in install-all.sh pre-install-check.sh test-all.sh; do
+for helper in install-all.sh install-all-steps.sh pre-install-check.sh test-all.sh; do
     [[ -f "$SCRIPT_DIR/$helper" ]] || continue
     cp "$SCRIPT_DIR/$helper" "$BUNDLE_PARENT/$helper"
     chmod +x "$BUNDLE_PARENT/$helper"
 done
-if [[ -d "$SCRIPT_DIR/install-all.d" ]]; then
-    rm -rf "$BUNDLE_PARENT/install-all.d"
-    cp -r "$SCRIPT_DIR/install-all.d" "$BUNDLE_PARENT/install-all.d"
-    find "$BUNDLE_PARENT/install-all.d" -name '*.sh' -exec chmod +x {} +
-fi
 
 log "Done."
 printf '\n'
@@ -1144,16 +1139,17 @@ printf '  Installer : %s\n' "$BUNDLE_PARENT/install-all.sh"
 printf '  Verifier  : %s\n' "$BUNDLE_PARENT/test-all.sh"
 printf '  Staging   : %s\n' "$OUT_DIR"
 printf '\n'
-printf 'Transfer to airgapped server:\n'
-printf '  scp -r "%s" "%s" \\\n         "%s" "%s" "%s" "%s/install-all.d" user@SERVER:~\n' \
-    "$BUNDLE_BIN" "${BUNDLE_BIN}.sha256" \
-    "$BUNDLE_PARENT/pre-install-check.sh" \
-    "$BUNDLE_PARENT/install-all.sh" \
-    "$BUNDLE_PARENT/test-all.sh" \
-    "$BUNDLE_PARENT"
-printf '  ssh user@SERVER\n'
+printf 'Transfer to airgapped server (FTP/scp one file at a time):\n'
+printf '  %s\n' "$BUNDLE_BIN"
+printf '  %s\n' "${BUNDLE_BIN}.sha256"
+printf '  %s\n' "$BUNDLE_PARENT/install-all.sh"
+printf '  %s\n' "$BUNDLE_PARENT/install-all-steps.sh"
+printf '  %s\n' "$BUNDLE_PARENT/pre-install-check.sh"
+printf '  %s\n' "$BUNDLE_PARENT/test-all.sh"
+printf '\n  (5 small scripts + 1 .bin + 1 .sha256 — no install-all.d/ dir to ship.)\n\n'
+printf 'On the target:\n'
 printf '  sudo bash pre-install-check.sh   # readiness gate\n'
-printf '  sudo bash install-all.sh         # auto-extracts the bundle, runs install-all.d/01-..17-\n'
+printf '  sudo bash install-all.sh         # auto-extracts the bundle, runs step_01..step_17\n'
 printf '  sudo bash install-all.sh --list  # any time: see per-step status\n'
 printf '  sudo bash install-all.sh --rerun 14   # re-run a specific failed step\n'
 printf '  sudo bash test-all.sh            # post-install verification\n'

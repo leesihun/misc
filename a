@@ -1,0 +1,1845 @@
+leesihun@icn401-0412-h08:~/installation$ sudo ./test-nvidia.sh
+
+[sudo] password for leesihun:
+
+
+
+== 1. Driver kernel module ==
+
+  [ PASS ] binary: nvidia-smi                       /usr/bin/nvidia-smi
+
+  [ PASS ] kmod: nvidia version                     580.159.04 (matches R580)
+
+  [ PASS ] kmod: nvidia loaded                      in lsmod
+
+  [ PASS ] kmod: nvidia .ko path                    /lib/modules/6.8.0-110-generic/updates/dkms/nvidia.ko.zst
+
+
+
+== 2. GPU enumeration ==
+
+  [ PASS ] GPU count                                8 (expected 8)
+
+  [ PASS ] GPU model                                NVIDIA B300 SXM6 AC (UUID: GPU-41532579-a6c3-0773-6271-af48c42e98ce)
+
+
+
+== 3. NVSwitch fabric ==
+
+  [ FAIL ] service: nvidia-fabricmanager            state=failed enabled=enabled
+
+  [ SKIP ] service: nvidia-nvlsm                    optional unit not present
+
+  [ PASS ] service: nvidia-persistenced             active, enabled
+
+  [ PASS ] fm: nv-fabricmanager -v                  Fabric Manager version is : 580.159.04
+
+  [ FAIL ] fabric state (per GPU)                   0/8 Completed (rest pending or failed)
+
+  [ FAIL ] nvlsm process                            no nvlsm process — NVSwitch routing tables not configured
+
+
+
+== 4. nvidia-peermem ==
+
+  [ FAIL ] kmod: nvidia_peermem                     not loaded — DOCA/driver ordering bug or peermem build failed; check dmesg for mlx5_core bind errors
+
+  [ PASS ] config: nvidia-peermem autoload          /etc/modules-load.d/nvidia-peermem.conf
+
+
+
+== 5. CUDA toolkit 13.0 ==
+
+  [ PASS ] dpkg: cuda-nvcc-13-0                     13.0.88-1
+
+  [ PASS ] dpkg: cuda-cudart-13-0                   13.0.96-1
+
+  [ PASS ] dpkg: cuda-cudart-dev-13-0               13.0.96-1
+
+  [ PASS ] dpkg: cuda-cccl-13-0                     13.0.85-1
+
+  [ PASS ] dpkg: libcublas-13-0                     13.1.1.3-1
+
+  [ PASS ] dpkg: libcublas-dev-13-0                 13.1.1.3-1
+
+  [ PASS ] dpkg: libnvjitlink-13-0                  13.0.88-1
+
+  [ PASS ] config: /etc/profile.d/cuda.sh           nvcc on login PATH
+
+  [ PASS ] ld.so cache: libcudart                   /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.13
+
+  [ PASS ] nvcc release                             13.0 via /usr/local/cuda/bin/nvcc
+
+
+
+== 6. NCCL ==
+
+  [ SKIP ] dpkg: libnccl2                           not installed (SKIP_NCCL was set, or PyTorch wheel only)
+
+
+
+== 7. DCGM ==
+
+  [ PASS ] dpkg: datacenter-gpu-manager-4-cuda13    1:4.5.3-1
+
+  [ PASS ] service: nvidia-dcgm                     active, enabled
+
+  [ PASS ] dcgm: dcgmi --version
+
+
+
+== 8. Persistence + ECC ==
+
+  [ PASS ] persistence mode                         Enabled on all GPUs
+
+  [ PASS ] ecc mode                                 Enabled
+
+
+
+== 9. Production sanity (HGX B300) ==
+
+  [ PASS ] kmod vs package version                  kmod=580.159.04  pkg=580.159.04
+
+  [ FAIL ] PCIe Gen5 x16 (per GPU)                  8/8 GPU(s) below Gen5 x16 (e.g. Gen6x16)
+
+awk: fatal: cannot use gawk builtin `exp' as variable name
+
+  [ PASS ] NVLink lanes per GPU                     8 GPU(s) × 18 active lanes
+
+  [ PASS ] MIG mode (must be disabled)              Disabled on all GPUs
+
+  [ FAIL ] Confidential Computing OFF               could not parse: CC status: OFF — verify manually then rerun
+
+  [ PASS ] GPU UUIDs unique                         8/8 distinct
+
+
+
+════════════════════════════════════════════════════════════════
+
+  SUMMARY  28 PASS  6 FAIL  0 MISS  2 SKIP
+
+════════════════════════════════════════════════════════════════
+
+NVIDIA stack NOT ready. Fix failures before running install-all.sh.
+
+leesihun@icn401-0412-h08:~/installation$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[1;36m[install-nv][0m install-nvidia.sh started at 20260526T041449Z
+
+[1;36m[install-nv][0m log: /home/leesihun/installation/install-nvidia-20260526T041449Z.log
+
+
+
+[1;35m══ 1. Bundle: locate + extract ══[0m
+
+[1;36m[install-nv][0m Verifying bundle SHA256
+
+[1;36m[install-nv][0m SHA256 ok
+
+[1;36m[install-nv][0m Extracting bundle to /var/tmp/GPU_server_downloads_nvidia
+
+[1;36m[install-nv][0m Bundle: /var/tmp/GPU_server_downloads_nvidia  (309 files, 2.5G)
+
+[1;36m[install-nv][0m Verifying meta/SHA256SUMS (320 entries)
+
+[1;36m[install-nv][0m Inner SHA256SUMS verified
+
+[1;36m[install-nv][0m Bundle: nvidia-stack  driver=580.159.04  cuda=13.0  nccl=skipped
+
+
+
+[1;35m══ 2. Local apt repo + pin ══[0m
+
+[1;36m[install-nv][0m Wrote /etc/apt/sources.list.d/00-nvidia-bundle.list
+
+[1;36m[install-nv][0m Wrote /etc/apt/preferences.d/99-nvidia-prefer-bundle
+
+[1;36m[install-nv][0m Refreshing apt indexes (file:// bundle only — hermetic)
+
+Get:1 file:/var/tmp/airgap-nvidia-debs ./ InRelease
+
+Ign:1 file:/var/tmp/airgap-nvidia-debs ./ InRelease
+
+Get:2 file:/var/tmp/airgap-nvidia-debs ./ Release
+
+Ign:2 file:/var/tmp/airgap-nvidia-debs ./ Release
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Ign:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Ign:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Ign:3 file:/var/tmp/airgap-nvidia-debs ./ Packages
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ Packages [97.5 kB]
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Ign:4 file:/var/tmp/airgap-nvidia-debs ./ Translation-en_US
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Ign:5 file:/var/tmp/airgap-nvidia-debs ./ Translation-en
+
+Reading package lists...
+
+
+
+[1;35m══ 3. Pre-driver: nouveau  ══[0m
+
+[1;36m[install-nv][0m /etc/modprobe.d/-nouveau-nvidia.conf already present (overwriting to ensure exact content)
+
+[1;36m[install-nv][0m Regenerating initramfs to apply nouveau 
+
+update-initramfs: Generating /boot/initrd.img-6.8.0-110-generic
+
+I: The initramfs will attempt to resume from /dev/nvme0n1p2
+
+I: (UUID=3a496ca6-b27d-4dde-a8ea-5615d9ac75e6)
+
+I: Set the RESUME variable to override this.
+
+
+
+[1;35m══ 4. NVIDIA core stack (single apt transaction) ══[0m
+
+[1;36m[install-nv][0m Installing: nvidia-driver-pinning-580 cuda-drivers-580=580.159.04-1ubuntu1 nvidia-driver-580-open=580.159.04-1ubuntu1 nvidia-fabricmanager=580.159.04-1ubuntu1 nvlsm libnvidia-nscq=580.159.04-1ubuntu1 nvidia-modprobe
+
+Reading package lists...
+
+Building dependency tree...
+
+Reading state information...
+
+The following additional packages will be installed:
+
+  libdrm-amdgpu1 libdrm-intel1 libegl-mesa0 libegl1 libepoxy0 libfontenc1
+
+  libgbm1 libgl1 libgl1-mesa-dri libglvnd0 libglx-mesa0 libglx0 libice6
+
+  libllvm20 libnvidia-cfg1-580 libnvidia-compute-580 libnvidia-decode-580
+
+  libnvidia-egl-gbm1 libnvidia-egl-wayland1 libnvidia-egl-xcb1
+
+  libnvidia-egl-xlib1 libnvidia-encode-580 libnvidia-fbc1-580 libnvidia-gl-580
+
+  libnvidia-gpucomp-580 libpciaccess0 libpixman-1-0 libsm6 libvulkan1
+
+  libwayland-client0 libwayland-server0 libx11-xcb1 libxaw7 libxcb-dri3-0
+
+  libxcb-glx0 libxcb-present0 libxcb-randr0 libxcb-shm0 libxcb-sync1
+
+  libxcb-xfixes0 libxcvt0 libxfont2 libxkbfile1 libxmu6 libxrandr2 libxrender1
+
+  libxshmfence1 libxt6t64 libxxf86vm1 mesa-libgallium nvidia-dkms-580-open
+
+  nvidia-firmware-580 nvidia-kernel-common-580 nvidia-kernel-source-580-open
+
+  nvidia-persistenced switcheroo-control x11-common x11-xkb-utils xcvt
+
+  xfonts-base xfonts-encodings xfonts-utils xserver-common xserver-xorg-core
+
+  xserver-xorg-video-nvidia-580
+
+Suggested packages:
+
+  xfs | xserver xfonts-100dpi | xfonts-75dpi xfonts-scalable
+
+Recommended packages:
+
+  mesa-vulkan-drivers | vulkan-icd nvidia-settings libnvidia-compute-580:i386
+
+  libnvidia-decode-580:i386 libnvidia-encode-580:i386 libnvidia-fbc1-580:i386
+
+  libnvidia-gl-580:i386
+
+The following NEW packages will be installed:
+
+  cuda-drivers-580 libdrm-amdgpu1 libdrm-intel1 libegl-mesa0 libegl1 libepoxy0
+
+  libfontenc1 libgbm1 libgl1 libgl1-mesa-dri libglvnd0 libglx-mesa0 libglx0
+
+  libice6 libllvm20 libnvidia-cfg1-580 libnvidia-compute-580
+
+  libnvidia-decode-580 libnvidia-egl-gbm1 libnvidia-egl-wayland1
+
+  libnvidia-egl-xcb1 libnvidia-egl-xlib1 libnvidia-encode-580
+
+  libnvidia-fbc1-580 libnvidia-gl-580 libnvidia-gpucomp-580 libnvidia-nscq
+
+  libpciaccess0 libpixman-1-0 libsm6 libvulkan1 libwayland-client0
+
+  libwayland-server0 libx11-xcb1 libxaw7 libxcb-dri3-0 libxcb-glx0
+
+  libxcb-present0 libxcb-randr0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0
+
+  libxcvt0 libxfont2 libxkbfile1 libxmu6 libxrandr2 libxrender1 libxshmfence1
+
+  libxt6t64 libxxf86vm1 mesa-libgallium nvidia-dkms-580-open
+
+  nvidia-driver-580-open nvidia-driver-pinning-580 nvidia-fabricmanager
+
+  nvidia-firmware-580 nvidia-kernel-common-580 nvidia-kernel-source-580-open
+
+  nvidia-modprobe nvidia-persistenced nvlsm switcheroo-control x11-common
+
+  x11-xkb-utils xcvt xfonts-base xfonts-encodings xfonts-utils xserver-common
+
+  xserver-xorg-core xserver-xorg-video-nvidia-580
+
+0 upgraded, 72 newly installed, 0 to remove and 17 not upgraded.
+
+Need to get 0 B/382 MB of archives.
+
+After this operation, 1,376 MB of additional disk space will be used.
+
+Get:1 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-decode-580 580.159.04-1ubuntu1 [2,724 kB]
+
+Get:2 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-cfg1-580 580.159.04-1ubuntu1 [148 kB]
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-gpucomp-580 580.159.04-1ubuntu1 [18.5 MB]
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ nvidia-persistenced 580.159.04-1ubuntu1 [24.5 kB]
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-compute-580 580.159.04-1ubuntu1 [54.7 MB]
+
+Get:6 file:/var/tmp/airgap-nvidia-debs ./ libdrm-amdgpu1 2.4.125-1ubuntu0.1~24.04.1 [21.4 kB]
+
+Get:7 file:/var/tmp/airgap-nvidia-debs ./ libpciaccess0 0.17-3ubuntu0.24.04.2 [18.9 kB]
+
+Get:8 file:/var/tmp/airgap-nvidia-debs ./ libdrm-intel1 2.4.125-1ubuntu0.1~24.04.1 [63.8 kB]
+
+Get:9 file:/var/tmp/airgap-nvidia-debs ./ libllvm20 1:20.1.2-0ubuntu1~24.04.2 [30.6 MB]
+
+Get:10 file:/var/tmp/airgap-nvidia-debs ./ libx11-xcb1 2:1.8.7-1build1 [7,800 B]
+
+Get:11 file:/var/tmp/airgap-nvidia-debs ./ libxcb-dri3-0 1.15-1ubuntu2 [7,142 B]
+
+Get:12 file:/var/tmp/airgap-nvidia-debs ./ libxcb-present0 1.15-1ubuntu2 [5,676 B]
+
+Get:13 file:/var/tmp/airgap-nvidia-debs ./ libxcb-randr0 1.15-1ubuntu2 [17.9 kB]
+
+Get:14 file:/var/tmp/airgap-nvidia-debs ./ libxcb-sync1 1.15-1ubuntu2 [9,312 B]
+
+Get:15 file:/var/tmp/airgap-nvidia-debs ./ libxcb-xfixes0 1.15-1ubuntu2 [10.2 kB]
+
+Get:16 file:/var/tmp/airgap-nvidia-debs ./ libxshmfence1 1.3-1build5 [4,764 B]
+
+Get:17 file:/var/tmp/airgap-nvidia-debs ./ mesa-libgallium 25.2.8-0ubuntu0.24.04.1 [10.8 MB]
+
+Get:18 file:/var/tmp/airgap-nvidia-debs ./ libgbm1 25.2.8-0ubuntu0.24.04.1 [34.2 kB]
+
+Get:19 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-egl-gbm1 1.1.3-1ubuntu1 [13.3 kB]
+
+Get:20 file:/var/tmp/airgap-nvidia-debs ./ libwayland-client0 1.22.0-2.1build1 [26.4 kB]
+
+Get:21 file:/var/tmp/airgap-nvidia-debs ./ libwayland-server0 1.22.0-2.1build1 [33.9 kB]
+
+Get:22 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-egl-wayland1 1:1.1.21-1ubuntu1 [34.0 kB]
+
+Get:23 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-egl-xcb1 1.0.5-1ubuntu1 [34.0 kB]
+
+Get:24 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-egl-xlib1 1.0.5-1ubuntu1 [34.6 kB]
+
+Get:25 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-gl-580 580.159.04-1ubuntu1 [148 MB]
+
+Get:26 file:/var/tmp/airgap-nvidia-debs ./ nvidia-kernel-source-580-open 580.159.04-1ubuntu1 [7,960 kB]
+
+Get:27 file:/var/tmp/airgap-nvidia-debs ./ nvidia-firmware-580 580.159.04-1ubuntu1 [74.8 MB]
+
+Get:28 file:/var/tmp/airgap-nvidia-debs ./ nvidia-modprobe 580.159.04-1ubuntu1 [15.7 kB]
+
+Get:29 file:/var/tmp/airgap-nvidia-debs ./ nvidia-kernel-common-580 580.159.04-1ubuntu1 [716 kB]
+
+Get:30 file:/var/tmp/airgap-nvidia-debs ./ nvidia-dkms-580-open 580.159.04-1ubuntu1 [15.3 kB]
+
+Get:31 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-encode-580 580.159.04-1ubuntu1 [107 kB]
+
+Get:32 file:/var/tmp/airgap-nvidia-debs ./ x11-common 1:7.7+23ubuntu3 [21.7 kB]
+
+Get:33 file:/var/tmp/airgap-nvidia-debs ./ libice6 2:1.0.10-1build3 [41.4 kB]
+
+Get:34 file:/var/tmp/airgap-nvidia-debs ./ libsm6 2:1.2.3-1build3 [15.7 kB]
+
+Get:35 file:/var/tmp/airgap-nvidia-debs ./ libxt6t64 1:1.2.1-1.2build1 [171 kB]
+
+Get:36 file:/var/tmp/airgap-nvidia-debs ./ libxmu6 2:1.1.3-3build2 [47.6 kB]
+
+Get:37 file:/var/tmp/airgap-nvidia-debs ./ libxaw7 2:1.0.14-1build2 [187 kB]
+
+Get:38 file:/var/tmp/airgap-nvidia-debs ./ libxkbfile1 1:1.1.0-1build4 [70.0 kB]
+
+Get:39 file:/var/tmp/airgap-nvidia-debs ./ libxrender1 1:0.9.10-1.1build1 [19.0 kB]
+
+Get:40 file:/var/tmp/airgap-nvidia-debs ./ libxrandr2 2:1.5.2-2build1 [19.7 kB]
+
+Get:41 file:/var/tmp/airgap-nvidia-debs ./ x11-xkb-utils 7.7+8build2 [170 kB]
+
+Get:42 file:/var/tmp/airgap-nvidia-debs ./ xserver-common 2:21.1.12-1ubuntu1.5 [34.6 kB]
+
+Get:43 file:/var/tmp/airgap-nvidia-debs ./ libglvnd0 1.7.0-1build1 [69.6 kB]
+
+Get:44 file:/var/tmp/airgap-nvidia-debs ./ libxcb-shm0 1.15-1ubuntu2 [5,756 B]
+
+Get:45 file:/var/tmp/airgap-nvidia-debs ./ libegl-mesa0 25.2.8-0ubuntu0.24.04.1 [117 kB]
+
+Get:46 file:/var/tmp/airgap-nvidia-debs ./ libegl1 1.7.0-1build1 [28.7 kB]
+
+Get:47 file:/var/tmp/airgap-nvidia-debs ./ libepoxy0 1.5.10-1build1 [220 kB]
+
+Get:48 file:/var/tmp/airgap-nvidia-debs ./ libxcb-glx0 1.15-1ubuntu2 [24.8 kB]
+
+Get:49 file:/var/tmp/airgap-nvidia-debs ./ libxxf86vm1 1:1.1.4-1build4 [9,282 B]
+
+Get:50 file:/var/tmp/airgap-nvidia-debs ./ libvulkan1 1.3.275.0-1build1 [142 kB]
+
+Get:51 file:/var/tmp/airgap-nvidia-debs ./ libgl1-mesa-dri 25.2.8-0ubuntu0.24.04.1 [37.9 kB]
+
+Get:52 file:/var/tmp/airgap-nvidia-debs ./ libglx-mesa0 25.2.8-0ubuntu0.24.04.1 [110 kB]
+
+Get:53 file:/var/tmp/airgap-nvidia-debs ./ libglx0 1.7.0-1build1 [38.6 kB]
+
+Get:54 file:/var/tmp/airgap-nvidia-debs ./ libgl1 1.7.0-1build1 [102 kB]
+
+Get:55 file:/var/tmp/airgap-nvidia-debs ./ libpixman-1-0 0.42.2-1build1 [279 kB]
+
+Get:56 file:/var/tmp/airgap-nvidia-debs ./ libxcvt0 0.1.2-1build1 [5,684 B]
+
+Get:57 file:/var/tmp/airgap-nvidia-debs ./ libfontenc1 1:1.1.8-1build1 [14.0 kB]
+
+Get:58 file:/var/tmp/airgap-nvidia-debs ./ libxfont2 1:2.0.6-1build1 [93.0 kB]
+
+Get:59 file:/var/tmp/airgap-nvidia-debs ./ xserver-xorg-core 2:21.1.12-1ubuntu1.5 [1,476 kB]
+
+Get:60 file:/var/tmp/airgap-nvidia-debs ./ xserver-xorg-video-nvidia-580 580.159.04-1ubuntu1 [2,166 kB]
+
+Get:61 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-fbc1-580 580.159.04-1ubuntu1 [87.2 kB]
+
+Get:62 file:/var/tmp/airgap-nvidia-debs ./ nvidia-driver-580-open 580.159.04-1ubuntu1 [13.0 kB]
+
+Get:63 file:/var/tmp/airgap-nvidia-debs ./ cuda-drivers-580 580.159.04-1ubuntu1 [2,594 B]
+
+Get:64 file:/var/tmp/airgap-nvidia-debs ./ libnvidia-nscq 580.159.04-1ubuntu1 [429 kB]
+
+Get:65 file:/var/tmp/airgap-nvidia-debs ./ nvidia-driver-pinning-580 580-1ubuntu3 [2,794 B]
+
+Get:66 file:/var/tmp/airgap-nvidia-debs ./ nvidia-fabricmanager 580.159.04-1ubuntu1 [8,956 kB]
+
+Get:67 file:/var/tmp/airgap-nvidia-debs ./ nvlsm 2025.10.12-1 [10.4 MB]
+
+Get:68 file:/var/tmp/airgap-nvidia-debs ./ switcheroo-control 2.6-2build2 [16.9 kB]
+
+Get:69 file:/var/tmp/airgap-nvidia-debs ./ xcvt 0.1.2-1build1 [6,982 B]
+
+Get:70 file:/var/tmp/airgap-nvidia-debs ./ xfonts-encodings 1:1.0.5-0ubuntu2 [578 kB]
+
+Get:71 file:/var/tmp/airgap-nvidia-debs ./ xfonts-utils 1:7.7+6build3 [94.4 kB]
+
+Get:72 file:/var/tmp/airgap-nvidia-debs ./ xfonts-base 1:1.0.5+nmu1 [5,941 kB]
+
+Selecting previously unselected package libnvidia-decode-580:amd64.
+
+(Reading database ... 
+
+(Reading database ... 5%
+
+(Reading database ... 10%
+
+(Reading database ... 15%
+
+(Reading database ... 20%
+
+(Reading database ... 25%
+
+(Reading database ... 30%
+
+(Reading database ... 35%
+
+(Reading database ... 40%
+
+(Reading database ... 45%
+
+(Reading database ... 50%
+
+(Reading database ... 55%
+
+(Reading database ... 60%
+
+(Reading database ... 65%
+
+(Reading database ... 70%
+
+(Reading database ... 75%
+
+(Reading database ... 80%
+
+(Reading database ... 85%
+
+(Reading database ... 90%
+
+(Reading database ... 95%
+
+(Reading database ... 100%
+
+(Reading database ... 141376 files and directories currently installed.)
+
+Preparing to unpack .../00-libnvidia-decode-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-decode-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-cfg1-580:amd64.
+
+Preparing to unpack .../01-libnvidia-cfg1-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-cfg1-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-gpucomp-580:amd64.
+
+Preparing to unpack .../02-libnvidia-gpucomp-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-gpucomp-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-persistenced.
+
+Preparing to unpack .../03-nvidia-persistenced_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-persistenced (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-compute-580:amd64.
+
+Preparing to unpack .../04-libnvidia-compute-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-compute-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libdrm-amdgpu1:amd64.
+
+Preparing to unpack .../05-libdrm-amdgpu1_2.4.125-1ubuntu0.1~24.04.1_amd64.deb ...
+
+Unpacking libdrm-amdgpu1:amd64 (2.4.125-1ubuntu0.1~24.04.1) ...
+
+Selecting previously unselected package libpciaccess0:amd64.
+
+Preparing to unpack .../06-libpciaccess0_0.17-3ubuntu0.24.04.2_amd64.deb ...
+
+Unpacking libpciaccess0:amd64 (0.17-3ubuntu0.24.04.2) ...
+
+Selecting previously unselected package libdrm-intel1:amd64.
+
+Preparing to unpack .../07-libdrm-intel1_2.4.125-1ubuntu0.1~24.04.1_amd64.deb ...
+
+Unpacking libdrm-intel1:amd64 (2.4.125-1ubuntu0.1~24.04.1) ...
+
+Selecting previously unselected package libllvm20:amd64.
+
+Preparing to unpack .../08-libllvm20_1%3a20.1.2-0ubuntu1~24.04.2_amd64.deb ...
+
+Unpacking libllvm20:amd64 (1:20.1.2-0ubuntu1~24.04.2) ...
+
+Selecting previously unselected package libx11-xcb1:amd64.
+
+Preparing to unpack .../09-libx11-xcb1_2%3a1.8.7-1build1_amd64.deb ...
+
+Unpacking libx11-xcb1:amd64 (2:1.8.7-1build1) ...
+
+Selecting previously unselected package libxcb-dri3-0:amd64.
+
+Preparing to unpack .../10-libxcb-dri3-0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-dri3-0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxcb-present0:amd64.
+
+Preparing to unpack .../11-libxcb-present0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-present0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxcb-randr0:amd64.
+
+Preparing to unpack .../12-libxcb-randr0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-randr0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxcb-sync1:amd64.
+
+Preparing to unpack .../13-libxcb-sync1_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-sync1:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxcb-xfixes0:amd64.
+
+Preparing to unpack .../14-libxcb-xfixes0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-xfixes0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxshmfence1:amd64.
+
+Preparing to unpack .../15-libxshmfence1_1.3-1build5_amd64.deb ...
+
+Unpacking libxshmfence1:amd64 (1.3-1build5) ...
+
+Selecting previously unselected package mesa-libgallium:amd64.
+
+Preparing to unpack .../16-mesa-libgallium_25.2.8-0ubuntu0.24.04.1_amd64.deb ...
+
+Unpacking mesa-libgallium:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Selecting previously unselected package libgbm1:amd64.
+
+Preparing to unpack .../17-libgbm1_25.2.8-0ubuntu0.24.04.1_amd64.deb ...
+
+Unpacking libgbm1:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Selecting previously unselected package libnvidia-egl-gbm1:amd64.
+
+Preparing to unpack .../18-libnvidia-egl-gbm1_1.1.3-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-egl-gbm1:amd64 (1.1.3-1ubuntu1) ...
+
+Selecting previously unselected package libwayland-client0:amd64.
+
+Preparing to unpack .../19-libwayland-client0_1.22.0-2.1build1_amd64.deb ...
+
+Unpacking libwayland-client0:amd64 (1.22.0-2.1build1) ...
+
+Selecting previously unselected package libwayland-server0:amd64.
+
+Preparing to unpack .../20-libwayland-server0_1.22.0-2.1build1_amd64.deb ...
+
+Unpacking libwayland-server0:amd64 (1.22.0-2.1build1) ...
+
+Selecting previously unselected package libnvidia-egl-wayland1:amd64.
+
+Preparing to unpack .../21-libnvidia-egl-wayland1_1%3a1.1.21-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-egl-wayland1:amd64 (1:1.1.21-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-egl-xcb1:amd64.
+
+Preparing to unpack .../22-libnvidia-egl-xcb1_1.0.5-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-egl-xcb1:amd64 (1.0.5-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-egl-xlib1:amd64.
+
+Preparing to unpack .../23-libnvidia-egl-xlib1_1.0.5-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-egl-xlib1:amd64 (1.0.5-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-gl-580:amd64.
+
+Preparing to unpack .../24-libnvidia-gl-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-gl-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-kernel-source-580-open.
+
+Preparing to unpack .../25-nvidia-kernel-source-580-open_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-kernel-source-580-open (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-firmware-580.
+
+Preparing to unpack .../26-nvidia-firmware-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-firmware-580 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-modprobe.
+
+Preparing to unpack .../27-nvidia-modprobe_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-modprobe (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-kernel-common-580.
+
+Preparing to unpack .../28-nvidia-kernel-common-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-kernel-common-580 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-dkms-580-open.
+
+Preparing to unpack .../29-nvidia-dkms-580-open_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-dkms-580-open (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-encode-580:amd64.
+
+Preparing to unpack .../30-libnvidia-encode-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-encode-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package x11-common.
+
+Preparing to unpack .../31-x11-common_1%3a7.7+23ubuntu3_all.deb ...
+
+Unpacking x11-common (1:7.7+23ubuntu3) ...
+
+Selecting previously unselected package libice6:amd64.
+
+Preparing to unpack .../32-libice6_2%3a1.0.10-1build3_amd64.deb ...
+
+Unpacking libice6:amd64 (2:1.0.10-1build3) ...
+
+Selecting previously unselected package libsm6:amd64.
+
+Preparing to unpack .../33-libsm6_2%3a1.2.3-1build3_amd64.deb ...
+
+Unpacking libsm6:amd64 (2:1.2.3-1build3) ...
+
+Selecting previously unselected package libxt6t64:amd64.
+
+Preparing to unpack .../34-libxt6t64_1%3a1.2.1-1.2build1_amd64.deb ...
+
+Unpacking libxt6t64:amd64 (1:1.2.1-1.2build1) ...
+
+Selecting previously unselected package libxmu6:amd64.
+
+Preparing to unpack .../35-libxmu6_2%3a1.1.3-3build2_amd64.deb ...
+
+Unpacking libxmu6:amd64 (2:1.1.3-3build2) ...
+
+Selecting previously unselected package libxaw7:amd64.
+
+Preparing to unpack .../36-libxaw7_2%3a1.0.14-1build2_amd64.deb ...
+
+Unpacking libxaw7:amd64 (2:1.0.14-1build2) ...
+
+Selecting previously unselected package libxkbfile1:amd64.
+
+Preparing to unpack .../37-libxkbfile1_1%3a1.1.0-1build4_amd64.deb ...
+
+Unpacking libxkbfile1:amd64 (1:1.1.0-1build4) ...
+
+Selecting previously unselected package libxrender1:amd64.
+
+Preparing to unpack .../38-libxrender1_1%3a0.9.10-1.1build1_amd64.deb ...
+
+Unpacking libxrender1:amd64 (1:0.9.10-1.1build1) ...
+
+Selecting previously unselected package libxrandr2:amd64.
+
+Preparing to unpack .../39-libxrandr2_2%3a1.5.2-2build1_amd64.deb ...
+
+Unpacking libxrandr2:amd64 (2:1.5.2-2build1) ...
+
+Selecting previously unselected package x11-xkb-utils.
+
+Preparing to unpack .../40-x11-xkb-utils_7.7+8build2_amd64.deb ...
+
+Unpacking x11-xkb-utils (7.7+8build2) ...
+
+Selecting previously unselected package xserver-common.
+
+Preparing to unpack .../41-xserver-common_2%3a21.1.12-1ubuntu1.5_all.deb ...
+
+Unpacking xserver-common (2:21.1.12-1ubuntu1.5) ...
+
+Selecting previously unselected package libglvnd0:amd64.
+
+Preparing to unpack .../42-libglvnd0_1.7.0-1build1_amd64.deb ...
+
+Unpacking libglvnd0:amd64 (1.7.0-1build1) ...
+
+Selecting previously unselected package libxcb-shm0:amd64.
+
+Preparing to unpack .../43-libxcb-shm0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-shm0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libegl-mesa0:amd64.
+
+Preparing to unpack .../44-libegl-mesa0_25.2.8-0ubuntu0.24.04.1_amd64.deb ...
+
+Unpacking libegl-mesa0:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Selecting previously unselected package libegl1:amd64.
+
+Preparing to unpack .../45-libegl1_1.7.0-1build1_amd64.deb ...
+
+Unpacking libegl1:amd64 (1.7.0-1build1) ...
+
+Selecting previously unselected package libepoxy0:amd64.
+
+Preparing to unpack .../46-libepoxy0_1.5.10-1build1_amd64.deb ...
+
+Unpacking libepoxy0:amd64 (1.5.10-1build1) ...
+
+Selecting previously unselected package libxcb-glx0:amd64.
+
+Preparing to unpack .../47-libxcb-glx0_1.15-1ubuntu2_amd64.deb ...
+
+Unpacking libxcb-glx0:amd64 (1.15-1ubuntu2) ...
+
+Selecting previously unselected package libxxf86vm1:amd64.
+
+Preparing to unpack .../48-libxxf86vm1_1%3a1.1.4-1build4_amd64.deb ...
+
+Unpacking libxxf86vm1:amd64 (1:1.1.4-1build4) ...
+
+Selecting previously unselected package libvulkan1:amd64.
+
+Preparing to unpack .../49-libvulkan1_1.3.275.0-1build1_amd64.deb ...
+
+Unpacking libvulkan1:amd64 (1.3.275.0-1build1) ...
+
+Selecting previously unselected package libgl1-mesa-dri:amd64.
+
+Preparing to unpack .../50-libgl1-mesa-dri_25.2.8-0ubuntu0.24.04.1_amd64.deb ...
+
+Unpacking libgl1-mesa-dri:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Selecting previously unselected package libglx-mesa0:amd64.
+
+Preparing to unpack .../51-libglx-mesa0_25.2.8-0ubuntu0.24.04.1_amd64.deb ...
+
+Unpacking libglx-mesa0:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Selecting previously unselected package libglx0:amd64.
+
+Preparing to unpack .../52-libglx0_1.7.0-1build1_amd64.deb ...
+
+Unpacking libglx0:amd64 (1.7.0-1build1) ...
+
+Selecting previously unselected package libgl1:amd64.
+
+Preparing to unpack .../53-libgl1_1.7.0-1build1_amd64.deb ...
+
+Unpacking libgl1:amd64 (1.7.0-1build1) ...
+
+Selecting previously unselected package libpixman-1-0:amd64.
+
+Preparing to unpack .../54-libpixman-1-0_0.42.2-1build1_amd64.deb ...
+
+Unpacking libpixman-1-0:amd64 (0.42.2-1build1) ...
+
+Selecting previously unselected package libxcvt0:amd64.
+
+Preparing to unpack .../55-libxcvt0_0.1.2-1build1_amd64.deb ...
+
+Unpacking libxcvt0:amd64 (0.1.2-1build1) ...
+
+Selecting previously unselected package libfontenc1:amd64.
+
+Preparing to unpack .../56-libfontenc1_1%3a1.1.8-1build1_amd64.deb ...
+
+Unpacking libfontenc1:amd64 (1:1.1.8-1build1) ...
+
+Selecting previously unselected package libxfont2:amd64.
+
+Preparing to unpack .../57-libxfont2_1%3a2.0.6-1build1_amd64.deb ...
+
+Unpacking libxfont2:amd64 (1:2.0.6-1build1) ...
+
+Selecting previously unselected package xserver-xorg-core.
+
+Preparing to unpack .../58-xserver-xorg-core_2%3a21.1.12-1ubuntu1.5_amd64.deb ...
+
+Unpacking xserver-xorg-core (2:21.1.12-1ubuntu1.5) ...
+
+Selecting previously unselected package xserver-xorg-video-nvidia-580.
+
+Preparing to unpack .../59-xserver-xorg-video-nvidia-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking xserver-xorg-video-nvidia-580 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-fbc1-580:amd64.
+
+Preparing to unpack .../60-libnvidia-fbc1-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-fbc1-580:amd64 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-driver-580-open.
+
+Preparing to unpack .../61-nvidia-driver-580-open_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-driver-580-open (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package cuda-drivers-580.
+
+Preparing to unpack .../62-cuda-drivers-580_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking cuda-drivers-580 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package libnvidia-nscq.
+
+Preparing to unpack .../63-libnvidia-nscq_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking libnvidia-nscq (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvidia-driver-pinning-580.
+
+Preparing to unpack .../64-nvidia-driver-pinning-580_580-1ubuntu3_all.deb ...
+
+Unpacking nvidia-driver-pinning-580 (580-1ubuntu3) ...
+
+Selecting previously unselected package nvidia-fabricmanager.
+
+Preparing to unpack .../65-nvidia-fabricmanager_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking nvidia-fabricmanager (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package nvlsm.
+
+Preparing to unpack .../66-nvlsm_2025.10.12-1_amd64.deb ...
+
+Unpacking nvlsm (2025.10.12-1) ...
+
+Selecting previously unselected package switcheroo-control.
+
+Preparing to unpack .../67-switcheroo-control_2.6-2build2_amd64.deb ...
+
+Unpacking switcheroo-control (2.6-2build2) ...
+
+Selecting previously unselected package xcvt.
+
+Preparing to unpack .../68-xcvt_0.1.2-1build1_amd64.deb ...
+
+Unpacking xcvt (0.1.2-1build1) ...
+
+Selecting previously unselected package xfonts-encodings.
+
+Preparing to unpack .../69-xfonts-encodings_1%3a1.0.5-0ubuntu2_all.deb ...
+
+Unpacking xfonts-encodings (1:1.0.5-0ubuntu2) ...
+
+Selecting previously unselected package xfonts-utils.
+
+Preparing to unpack .../70-xfonts-utils_1%3a7.7+6build3_amd64.deb ...
+
+Unpacking xfonts-utils (1:7.7+6build3) ...
+
+Selecting previously unselected package xfonts-base.
+
+Preparing to unpack .../71-xfonts-base_1%3a1.0.5+nmu1_all.deb ...
+
+Unpacking xfonts-base (1:1.0.5+nmu1) ...
+
+Setting up libxcb-dri3-0:amd64 (1.15-1ubuntu2) ...
+
+Setting up libpixman-1-0:amd64 (0.42.2-1build1) ...
+
+Setting up libwayland-server0:amd64 (1.22.0-2.1build1) ...
+
+Setting up libx11-xcb1:amd64 (2:1.8.7-1build1) ...
+
+Setting up libpciaccess0:amd64 (0.17-3ubuntu0.24.04.2) ...
+
+Setting up libxcb-xfixes0:amd64 (1.15-1ubuntu2) ...
+
+Setting up libnvidia-gpucomp-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up libnvidia-fbc1-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up libxrender1:amd64 (1:0.9.10-1.1build1) ...
+
+Setting up libglvnd0:amd64 (1.7.0-1build1) ...
+
+Setting up libxcb-glx0:amd64 (1.15-1ubuntu2) ...
+
+Setting up libdrm-intel1:amd64 (2.4.125-1ubuntu0.1~24.04.1) ...
+
+Setting up x11-common (1:7.7+23ubuntu3) ...
+
+Setting up libxcb-shm0:amd64 (1.15-1ubuntu2) ...
+
+Setting up nvlsm (2025.10.12-1) ...
+
+Setting up nvidia-driver-pinning-580 (580-1ubuntu3) ...
+
+Setting up libxxf86vm1:amd64 (1:1.1.4-1build4) ...
+
+Setting up nvidia-modprobe (580.159.04-1ubuntu1) ...
+
+Setting up libxcb-present0:amd64 (1.15-1ubuntu2) ...
+
+Setting up libfontenc1:amd64 (1:1.1.8-1build1) ...
+
+Setting up libepoxy0:amd64 (1.5.10-1build1) ...
+
+Setting up libxcb-sync1:amd64 (1.15-1ubuntu2) ...
+
+Setting up xfonts-encodings (1:1.0.5-0ubuntu2) ...
+
+Setting up nvidia-firmware-580 (580.159.04-1ubuntu1) ...
+
+Setting up libxrandr2:amd64 (2:1.5.2-2build1) ...
+
+Setting up libllvm20:amd64 (1:20.1.2-0ubuntu1~24.04.2) ...
+
+Setting up nvidia-fabricmanager (580.159.04-1ubuntu1) ...
+
+Created symlink /etc/systemd/system/multi-user.target.wants/nvidia-fabricmanager.service → /usr/lib/systemd/system/nvidia-fabricmanager.service.
+
+Could not execute systemctl:  at /usr/bin/deb-systemd-invoke line 148.
+
+Setting up libvulkan1:amd64 (1.3.275.0-1build1) ...
+
+Setting up libxshmfence1:amd64 (1.3-1build5) ...
+
+Setting up libxcb-randr0:amd64 (1.15-1ubuntu2) ...
+
+Setting up libnvidia-cfg1-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up switcheroo-control (2.6-2build2) ...
+
+Created symlink /etc/systemd/system/graphical.target.wants/switcheroo-control.service → /usr/lib/systemd/system/switcheroo-control.service.
+
+Setting up libxcvt0:amd64 (0.1.2-1build1) ...
+
+Setting up libxkbfile1:amd64 (1:1.1.0-1build4) ...
+
+Setting up libnvidia-nscq (580.159.04-1ubuntu1) ...
+
+Setting up libxfont2:amd64 (1:2.0.6-1build1) ...
+
+Setting up nvidia-kernel-source-580-open (580.159.04-1ubuntu1) ...
+
+Setting up libdrm-amdgpu1:amd64 (2.4.125-1ubuntu0.1~24.04.1) ...
+
+Setting up libwayland-client0:amd64 (1.22.0-2.1build1) ...
+
+Setting up libice6:amd64 (2:1.0.10-1build3) ...
+
+Setting up mesa-libgallium:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Setting up nvidia-persistenced (580.159.04-1ubuntu1) ...
+
+info: The home dir /var/run/nvidia-persistenced/ you specified can't be accessed: No such file or directory
+
+
+
+info: Selecting UID from range 100 to 999 ...
+
+
+
+info: Selecting GID from range 100 to 999 ...
+
+info: Adding system user `nvidia-persistenced' (UID 114) ...
+
+info: Adding new group `nvidia-persistenced' (GID 112) ...
+
+info: Adding new user `nvidia-persistenced' (UID 114) with group `nvidia-persistenced' ...
+
+info: Not creating home directory `/var/run/nvidia-persistenced/'.
+
+Created symlink /etc/systemd/system/multi-user.target.wants/nvidia-persistenced.service → /usr/lib/systemd/system/nvidia-persistenced.service.
+
+Could not execute systemctl:  at /usr/bin/deb-systemd-invoke line 148.
+
+Setting up libgbm1:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Setting up libgl1-mesa-dri:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Setting up xfonts-utils (1:7.7+6build3) ...
+
+Setting up libnvidia-egl-xcb1:amd64 (1.0.5-1ubuntu1) ...
+
+Setting up xcvt (0.1.2-1build1) ...
+
+Setting up libnvidia-egl-wayland1:amd64 (1:1.1.21-1ubuntu1) ...
+
+Setting up nvidia-kernel-common-580 (580.159.04-1ubuntu1) ...
+
+update-initramfs: deferring update (trigger activated)
+
+Setting up xfonts-base (1:1.0.5+nmu1) ...
+
+Setting up libegl-mesa0:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Setting up libnvidia-egl-xlib1:amd64 (1.0.5-1ubuntu1) ...
+
+Setting up libegl1:amd64 (1.7.0-1build1) ...
+
+Setting up libsm6:amd64 (2:1.2.3-1build3) ...
+
+Setting up nvidia-dkms-580-open (580.159.04-1ubuntu1) ...
+
+update-initramfs: deferring update (trigger activated)
+
+INFO:Enable nvidia
+
+DEBUG:Parsing /usr/share/ubuntu-drivers-common/quirks/lenovo_thinkpad
+
+DEBUG:Parsing /usr/share/ubuntu-drivers-common/quirks/dell_latitude
+
+DEBUG:Parsing /usr/share/ubuntu-drivers-common/quirks/put_your_quirks_here
+
+Loading new nvidia/580.159.04 DKMS files...
+
+Building for 6.8.0-110-generic
+
+
+
+Building initial module nvidia/580.159.04 for 6.8.0-110-generic
+
+Sign command: /usr/bin/kmodsign
+
+Signing key: /var/lib/shim-signed/mok/MOK.priv
+
+Public certificate (MOK): /var/lib/shim-signed/mok/MOK.der
+
+
+
+Building module(s)......... done.
+
+Signing module /var/lib/dkms/nvidia/580.159.04/build/nvidia.ko
+
+Signing module /var/lib/dkms/nvidia/580.159.04/build/nvidia-modeset.ko
+
+Signing module /var/lib/dkms/nvidia/580.159.04/build/nvidia-drm.ko
+
+Signing module /var/lib/dkms/nvidia/580.159.04/build/nvidia-uvm.ko
+
+Signing module /var/lib/dkms/nvidia/580.159.04/build/nvidia-peermem.ko
+
+Installing /lib/modules/6.8.0-110-generic/updates/dkms/nvidia.ko.zst
+
+Installing /lib/modules/6.8.0-110-generic/updates/dkms/nvidia-modeset.ko.zst
+
+Installing /lib/modules/6.8.0-110-generic/updates/dkms/nvidia-drm.ko.zst
+
+Installing /lib/modules/6.8.0-110-generic/updates/dkms/nvidia-uvm.ko.zst
+
+Installing /lib/modules/6.8.0-110-generic/updates/dkms/nvidia-peermem.ko.zst
+
+Running depmod... done.
+
+Setting up libnvidia-egl-gbm1:amd64 (1.1.3-1ubuntu1) ...
+
+Setting up libglx-mesa0:amd64 (25.2.8-0ubuntu0.24.04.1) ...
+
+Setting up libglx0:amd64 (1.7.0-1build1) ...
+
+Setting up libgl1:amd64 (1.7.0-1build1) ...
+
+Setting up libxt6t64:amd64 (1:1.2.1-1.2build1) ...
+
+Setting up libxmu6:amd64 (2:1.1.3-3build2) ...
+
+Setting up libxaw7:amd64 (2:1.0.14-1build2) ...
+
+Setting up x11-xkb-utils (7.7+8build2) ...
+
+Setting up xserver-common (2:21.1.12-1ubuntu1.5) ...
+
+Setting up xserver-xorg-core (2:21.1.12-1ubuntu1.5) ...
+
+Setting up libnvidia-compute-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up libnvidia-gl-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up libnvidia-decode-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up xserver-xorg-video-nvidia-580 (580.159.04-1ubuntu1) ...
+
+Setting up libnvidia-encode-580:amd64 (580.159.04-1ubuntu1) ...
+
+Setting up nvidia-driver-580-open (580.159.04-1ubuntu1) ...
+
+Setting up cuda-drivers-580 (580.159.04-1ubuntu1) ...
+
+Processing triggers for man-db (2.12.0-4build2) ...
+
+Processing triggers for dbus (1.14.10-4ubuntu4.1) ...
+
+Processing triggers for udev (255.4-1ubuntu8.12) ...
+
+Processing triggers for initramfs-tools (0.142ubuntu25.8) ...
+
+update-initramfs: Generating /boot/initrd.img-6.8.0-110-generic
+
+I: The initramfs will attempt to resume from /dev/nvme0n1p2
+
+I: (UUID=3a496ca6-b27d-4dde-a8ea-5615d9ac75e6)
+
+I: Set the RESUME variable to override this.
+
+Processing triggers for libc-bin (2.39-0ubuntu8.7) ...
+
+
+
+Running kernel seems to be up-to-date.
+
+
+
+The processor microcode seems to be up-to-date.
+
+
+
+No services need to be restarted.
+
+
+
+No containers need to be restarted.
+
+
+
+No user sessions are running outdated binaries.
+
+
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+
+[1;36m[install-nv][0m Wrote /etc/modules-load.d/nvidia-peermem.conf
+
+
+
+[1;35m══ 5. CUDA toolkit (minimal) 13.0 ══[0m
+
+[1;36m[install-nv][0m Installing (minimal toolkit, ~600MB instead of ~3GB): cuda-nvcc-13-0 cuda-cudart-13-0 cuda-cudart-dev-13-0 cuda-cccl-13-0 libcublas-13-0 libcublas-dev-13-0 libnvjitlink-13-0 cuda-compat-13-0=580.159.04-1ubuntu1
+
+Reading package lists...
+
+Building dependency tree...
+
+Reading state information...
+
+The following additional packages will be installed:
+
+  cuda-crt-13-0 cuda-culibos-dev-13-0 cuda-driver-dev-13-0
+
+  cuda-toolkit-13-0-config-common cuda-toolkit-13-config-common
+
+  cuda-toolkit-config-common libnvptxcompiler-13-0 libnvvm-13-0
+
+The following NEW packages will be installed:
+
+  cuda-cccl-13-0 cuda-compat-13-0 cuda-crt-13-0 cuda-cudart-13-0
+
+  cuda-cudart-dev-13-0 cuda-culibos-dev-13-0 cuda-driver-dev-13-0
+
+  cuda-nvcc-13-0 cuda-toolkit-13-0-config-common cuda-toolkit-13-config-common
+
+  cuda-toolkit-config-common libcublas-13-0 libcublas-dev-13-0
+
+  libnvjitlink-13-0 libnvptxcompiler-13-0 libnvvm-13-0
+
+0 upgraded, 16 newly installed, 0 to remove and 17 not upgraded.
+
+Need to get 0 B/1,020 MB of archives.
+
+After this operation, 2,338 MB of additional disk space will be used.
+
+Get:1 file:/var/tmp/airgap-nvidia-debs ./ cuda-cccl-13-0 13.0.85-1 [1,034 kB]
+
+Get:2 file:/var/tmp/airgap-nvidia-debs ./ cuda-compat-13-0 580.159.04-1ubuntu1 [65.4 MB]
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ cuda-toolkit-config-common 13.2.75-1 [17.4 kB]
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ cuda-toolkit-13-config-common 13.2.75-1 [17.4 kB]
+
+Get:5 file:/var/tmp/airgap-nvidia-debs ./ cuda-toolkit-13-0-config-common 13.0.96-1 [17.3 kB]
+
+Get:6 file:/var/tmp/airgap-nvidia-debs ./ cuda-cudart-13-0 13.0.96-1 [163 kB]
+
+Get:7 file:/var/tmp/airgap-nvidia-debs ./ cuda-culibos-dev-13-0 13.0.85-1 [23.9 kB]
+
+Get:8 file:/var/tmp/airgap-nvidia-debs ./ cuda-driver-dev-13-0 13.0.96-1 [30.3 kB]
+
+Get:9 file:/var/tmp/airgap-nvidia-debs ./ cuda-cudart-dev-13-0 13.0.96-1 [1,393 kB]
+
+Get:10 file:/var/tmp/airgap-nvidia-debs ./ cuda-crt-13-0 13.0.88-1 [82.7 kB]
+
+Get:11 file:/var/tmp/airgap-nvidia-debs ./ libnvvm-13-0 13.0.88-1 [43.7 MB]
+
+Get:12 file:/var/tmp/airgap-nvidia-debs ./ libnvptxcompiler-13-0 13.0.88-1 [13.8 MB]
+
+Get:13 file:/var/tmp/airgap-nvidia-debs ./ cuda-nvcc-13-0 13.0.88-1 [26.7 MB]
+
+Get:14 file:/var/tmp/airgap-nvidia-debs ./ libcublas-13-0 13.1.1.3-1 [392 MB]
+
+Get:15 file:/var/tmp/airgap-nvidia-debs ./ libcublas-dev-13-0 13.1.1.3-1 [447 MB]
+
+Get:16 file:/var/tmp/airgap-nvidia-debs ./ libnvjitlink-13-0 13.0.88-1 [29.4 MB]
+
+Selecting previously unselected package cuda-cccl-13-0.
+
+(Reading database ... 
+
+(Reading database ... 5%
+
+(Reading database ... 10%
+
+(Reading database ... 15%
+
+(Reading database ... 20%
+
+(Reading database ... 25%
+
+(Reading database ... 30%
+
+(Reading database ... 35%
+
+(Reading database ... 40%
+
+(Reading database ... 45%
+
+(Reading database ... 50%
+
+(Reading database ... 55%
+
+(Reading database ... 60%
+
+(Reading database ... 65%
+
+(Reading database ... 70%
+
+(Reading database ... 75%
+
+(Reading database ... 80%
+
+(Reading database ... 85%
+
+(Reading database ... 90%
+
+(Reading database ... 95%
+
+(Reading database ... 100%
+
+(Reading database ... 143034 files and directories currently installed.)
+
+Preparing to unpack .../00-cuda-cccl-13-0_13.0.85-1_amd64.deb ...
+
+Unpacking cuda-cccl-13-0 (13.0.85-1) ...
+
+Selecting previously unselected package cuda-compat-13-0.
+
+Preparing to unpack .../01-cuda-compat-13-0_580.159.04-1ubuntu1_amd64.deb ...
+
+Unpacking cuda-compat-13-0 (580.159.04-1ubuntu1) ...
+
+Selecting previously unselected package cuda-toolkit-config-common.
+
+Preparing to unpack .../02-cuda-toolkit-config-common_13.2.75-1_all.deb ...
+
+Unpacking cuda-toolkit-config-common (13.2.75-1) ...
+
+Selecting previously unselected package cuda-toolkit-13-config-common.
+
+Preparing to unpack .../03-cuda-toolkit-13-config-common_13.2.75-1_all.deb ...
+
+Unpacking cuda-toolkit-13-config-common (13.2.75-1) ...
+
+Selecting previously unselected package cuda-toolkit-13-0-config-common.
+
+Preparing to unpack .../04-cuda-toolkit-13-0-config-common_13.0.96-1_all.deb ...
+
+Unpacking cuda-toolkit-13-0-config-common (13.0.96-1) ...
+
+Selecting previously unselected package cuda-cudart-13-0.
+
+Preparing to unpack .../05-cuda-cudart-13-0_13.0.96-1_amd64.deb ...
+
+Unpacking cuda-cudart-13-0 (13.0.96-1) ...
+
+Selecting previously unselected package cuda-culibos-dev-13-0.
+
+Preparing to unpack .../06-cuda-culibos-dev-13-0_13.0.85-1_amd64.deb ...
+
+Unpacking cuda-culibos-dev-13-0 (13.0.85-1) ...
+
+Selecting previously unselected package cuda-driver-dev-13-0.
+
+Preparing to unpack .../07-cuda-driver-dev-13-0_13.0.96-1_amd64.deb ...
+
+Unpacking cuda-driver-dev-13-0 (13.0.96-1) ...
+
+Selecting previously unselected package cuda-cudart-dev-13-0.
+
+Preparing to unpack .../08-cuda-cudart-dev-13-0_13.0.96-1_amd64.deb ...
+
+Unpacking cuda-cudart-dev-13-0 (13.0.96-1) ...
+
+Selecting previously unselected package cuda-crt-13-0.
+
+Preparing to unpack .../09-cuda-crt-13-0_13.0.88-1_amd64.deb ...
+
+Unpacking cuda-crt-13-0 (13.0.88-1) ...
+
+Selecting previously unselected package libnvvm-13-0.
+
+Preparing to unpack .../10-libnvvm-13-0_13.0.88-1_amd64.deb ...
+
+Unpacking libnvvm-13-0 (13.0.88-1) ...
+
+Selecting previously unselected package libnvptxcompiler-13-0.
+
+Preparing to unpack .../11-libnvptxcompiler-13-0_13.0.88-1_amd64.deb ...
+
+Unpacking libnvptxcompiler-13-0 (13.0.88-1) ...
+
+Selecting previously unselected package cuda-nvcc-13-0.
+
+Preparing to unpack .../12-cuda-nvcc-13-0_13.0.88-1_amd64.deb ...
+
+Unpacking cuda-nvcc-13-0 (13.0.88-1) ...
+
+Selecting previously unselected package libcublas-13-0.
+
+Preparing to unpack .../13-libcublas-13-0_13.1.1.3-1_amd64.deb ...
+
+Unpacking libcublas-13-0 (13.1.1.3-1) ...
+
+Selecting previously unselected package libcublas-dev-13-0.
+
+Preparing to unpack .../14-libcublas-dev-13-0_13.1.1.3-1_amd64.deb ...
+
+Unpacking libcublas-dev-13-0 (13.1.1.3-1) ...
+
+Selecting previously unselected package libnvjitlink-13-0.
+
+Preparing to unpack .../15-libnvjitlink-13-0_13.0.88-1_amd64.deb ...
+
+Unpacking libnvjitlink-13-0 (13.0.88-1) ...
+
+Setting up cuda-toolkit-config-common (13.2.75-1) ...
+
+Setting up cuda-toolkit-13-config-common (13.2.75-1) ...
+
+Setting up cuda-cccl-13-0 (13.0.85-1) ...
+
+Setting up cuda-compat-13-0 (580.159.04-1ubuntu1) ...
+
+Setting up cuda-culibos-dev-13-0 (13.0.85-1) ...
+
+Setting up cuda-toolkit-13-0-config-common (13.0.96-1) ...
+
+Setting alternatives
+
+update-alternatives: using /usr/local/cuda-13.0 to provide /usr/local/cuda (cuda) in auto mode
+
+update-alternatives: using /usr/local/cuda-13.0 to provide /usr/local/cuda-13 (cuda-13) in auto mode
+
+Setting up libnvptxcompiler-13-0 (13.0.88-1) ...
+
+Setting up cuda-driver-dev-13-0 (13.0.96-1) ...
+
+Setting up libcublas-13-0 (13.1.1.3-1) ...
+
+Setting up libnvvm-13-0 (13.0.88-1) ...
+
+Setting up cuda-cudart-13-0 (13.0.96-1) ...
+
+Setting up libcublas-dev-13-0 (13.1.1.3-1) ...
+
+Setting up libnvjitlink-13-0 (13.0.88-1) ...
+
+Setting up cuda-cudart-dev-13-0 (13.0.96-1) ...
+
+Setting up cuda-crt-13-0 (13.0.88-1) ...
+
+Setting up cuda-nvcc-13-0 (13.0.88-1) ...
+
+Processing triggers for libc-bin (2.39-0ubuntu8.7) ...
+
+
+
+Running kernel seems to be up-to-date.
+
+
+
+The processor microcode seems to be up-to-date.
+
+
+
+No services need to be restarted.
+
+
+
+No containers need to be restarted.
+
+
+
+No user sessions are running outdated binaries.
+
+
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+
+
+
+[1;35m══ 5b. CUDA env wiring (/etc/profile.d/cuda.sh, /etc/ld.so.conf.d/cuda-system.conf) ══[0m
+
+[1;36m[install-nv][0m Wrote /etc/profile.d/cuda.sh (PATH only — LD_LIBRARY_PATH intentionally NOT set)
+
+[1;36m[install-nv][0m Wrote /etc/ld.so.conf.d/cuda-system.conf and ran ldconfig
+
+
+
+[1;35m══ 6. NCCL ══[0m
+
+[1;36m[install-nv][0m SKIP_NCCL=1 (default) — host NCCL skipped; PyTorch/vLLM venvs use their bundled nvidia-nccl-cu13.
+
+
+
+[1;35m══ 7. DCGM ══[0m
+
+Reading package lists...
+
+Building dependency tree...
+
+Reading state information...
+
+The following additional packages will be installed:
+
+  datacenter-gpu-manager-4-core datacenter-gpu-manager-4-proprietary
+
+  datacenter-gpu-manager-4-proprietary-cuda13
+
+The following NEW packages will be installed:
+
+  datacenter-gpu-manager-4-core datacenter-gpu-manager-4-cuda13
+
+  datacenter-gpu-manager-4-proprietary
+
+  datacenter-gpu-manager-4-proprietary-cuda13
+
+0 upgraded, 4 newly installed, 0 to remove and 17 not upgraded.
+
+Need to get 0 B/643 MB of archives.
+
+After this operation, 2,014 MB of additional disk space will be used.
+
+Get:1 file:/var/tmp/airgap-nvidia-debs ./ datacenter-gpu-manager-4-core 1:4.5.3-1 [10.7 MB]
+
+Get:2 file:/var/tmp/airgap-nvidia-debs ./ datacenter-gpu-manager-4-cuda13 1:4.5.3-1 [439 MB]
+
+Get:3 file:/var/tmp/airgap-nvidia-debs ./ datacenter-gpu-manager-4-proprietary 1:4.5.3-1 [5,566 kB]
+
+Get:4 file:/var/tmp/airgap-nvidia-debs ./ datacenter-gpu-manager-4-proprietary-cuda13 1:4.5.3-1 [188 MB]
+
+Selecting previously unselected package datacenter-gpu-manager-4-core.
+
+(Reading database ... 
+
+(Reading database ... 5%
+
+(Reading database ... 10%
+
+(Reading database ... 15%
+
+(Reading database ... 20%
+
+(Reading database ... 25%
+
+(Reading database ... 30%
+
+(Reading database ... 35%
+
+(Reading database ... 40%
+
+(Reading database ... 45%
+
+(Reading database ... 50%
+
+(Reading database ... 55%
+
+(Reading database ... 60%
+
+(Reading database ... 65%
+
+(Reading database ... 70%
+
+(Reading database ... 75%
+
+(Reading database ... 80%
+
+(Reading database ... 85%
+
+(Reading database ... 90%
+
+(Reading database ... 95%
+
+(Reading database ... 100%
+
+(Reading database ... 145116 files and directories currently installed.)
+
+Preparing to unpack .../datacenter-gpu-manager-4-core_1%3a4.5.3-1_amd64.deb ...
+
+Unpacking datacenter-gpu-manager-4-core (1:4.5.3-1) ...
+
+Selecting previously unselected package datacenter-gpu-manager-4-cuda13.
+
+Preparing to unpack .../datacenter-gpu-manager-4-cuda13_1%3a4.5.3-1_amd64.deb ...
+
+Unpacking datacenter-gpu-manager-4-cuda13 (1:4.5.3-1) ...
+
+Selecting previously unselected package datacenter-gpu-manager-4-proprietary.
+
+Preparing to unpack .../datacenter-gpu-manager-4-proprietary_1%3a4.5.3-1_amd64.deb ...
+
+Unpacking datacenter-gpu-manager-4-proprietary (1:4.5.3-1) ...
+
+Selecting previously unselected package datacenter-gpu-manager-4-proprietary-cuda13.
+
+Preparing to unpack .../datacenter-gpu-manager-4-proprietary-cuda13_1%3a4.5.3-1_amd64.deb ...
+
+Unpacking datacenter-gpu-manager-4-proprietary-cuda13 (1:4.5.3-1) ...
+
+Setting up datacenter-gpu-manager-4-core (1:4.5.3-1) ...
+
+Setting up datacenter-gpu-manager-4-cuda13 (1:4.5.3-1) ...
+
+Setting up datacenter-gpu-manager-4-proprietary (1:4.5.3-1) ...
+
+Setting up datacenter-gpu-manager-4-proprietary-cuda13 (1:4.5.3-1) ...
+
+Processing triggers for libc-bin (2.39-0ubuntu8.7) ...
+
+
+
+Running kernel seems to be up-to-date.
+
+
+
+The processor microcode seems to be up-to-date.
+
+
+
+No services need to be restarted.
+
+
+
+No containers need to be restarted.
+
+
+
+No user sessions are running outdated binaries.
+
+
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+
+
+
+[1;35m══ 8. apt-mark hold ══[0m
+
+[1;36m[install-nv][0m Holding 33 NVIDIA packages
+
+cuda-cccl-13-0 set on hold.
+
+cuda-compat-13-0 set on hold.
+
+cuda-cudart-13-0 set on hold.
+
+cuda-cudart-dev-13-0 set on hold.
+
+cuda-drivers-580 set on hold.
+
+cuda-nvcc-13-0 set on hold.
+
+datacenter-gpu-manager-4-core set on hold.
+
+datacenter-gpu-manager-4-cuda13 set on hold.
+
+datacenter-gpu-manager-4-proprietary set on hold.
+
+datacenter-gpu-manager-4-proprietary-cuda13 set on hold.
+
+libcublas-13-0 set on hold.
+
+libcublas-dev-13-0 set on hold.
+
+libnvidia-cfg1-580 set on hold.
+
+libnvidia-compute-580 set on hold.
+
+libnvidia-decode-580 set on hold.
+
+libnvidia-egl-gbm1 set on hold.
+
+libnvidia-egl-wayland1 set on hold.
+
+libnvidia-egl-xcb1 set on hold.
+
+libnvidia-egl-xlib1 set on hold.
+
+libnvidia-encode-580 set on hold.
+
+libnvidia-fbc1-580 set on hold.
+
+libnvidia-gl-580 set on hold.
+
+libnvidia-gpucomp-580 set on hold.
+
+libnvidia-nscq set on hold.
+
+libnvjitlink-13-0 set on hold.
+
+nvidia-dkms-580-open set on hold.
+
+nvidia-driver-580-open set on hold.
+
+nvidia-driver-pinning-580 set on hold.
+
+nvidia-kernel-common-580 set on hold.
+
+nvidia-kernel-source-580-open set on hold.
+
+nvidia-modprobe set on hold.
+
+nvidia-persistenced set on hold.
+
+nvlsm set on hold.
+
+
+
+[1;35m══ 9. Services: enable on boot ══[0m
+
+[1;36m[install-nv][0m enabled: nvidia-fabricmanager
+
+[1;36m[install-nv][0m enabled: nvidia-persistenced
+
+Created symlink /etc/systemd/system/dcgm.service → /usr/lib/systemd/system/nvidia-dcgm.service.
+
+Created symlink /etc/systemd/system/multi-user.target.wants/nvidia-dcgm.service → /usr/lib/systemd/system/nvidia-dcgm.service.
+
+[1;36m[install-nv][0m enabled: nvidia-dcgm
+
+[1;36m[install-nv][0m skip (unit not present): nvidia-nvlsm
+
+
+
+[1;35m══ 9b. Pre-reboot verification ══[0m
+
+[1;36m[install-nv][0m verify ok  : dpkg nvidia-driver-pinning-580 (580-1ubuntu3)
+
+[1;36m[install-nv][0m verify ok  : dpkg cuda-drivers-580 (580.159.04-1ubuntu1)
+
+[1;36m[install-nv][0m verify ok  : dpkg nvidia-driver-580-open (580.159.04-1ubuntu1)
+
+[1;36m[install-nv][0m verify ok  : dpkg nvidia-fabricmanager (580.159.04-1ubuntu1)
+
+[1;36m[install-nv][0m verify ok  : dpkg nvlsm (2025.10.12-1)
+
+[1;36m[install-nv][0m verify ok  : dpkg libnvidia-nscq (580.159.04-1ubuntu1)
+
+[1;36m[install-nv][0m verify ok  : dpkg nvidia-modprobe (580.159.04-1ubuntu1)
+
+[1;36m[install-nv][0m verify ok  : kmod nvidia.ko present at /lib/modules/6.8.0-110-generic/updates/dkms/nvidia.ko.zst
+
+[1;36m[install-nv][0m verify ok  : initramfs present at /boot/initrd.img-6.8.0-110-generic
+
+[1;36m[install-nv][0m verify ok  : config /etc/modprobe.d/-nouveau-nvidia.conf
+
+[1;36m[install-nv][0m verify ok  : config /etc/modules-load.d/nvidia-peermem.conf
+
+[1;36m[install-nv][0m verify ok  : config /etc/profile.d/cuda.sh
+
+[1;36m[install-nv][0m verify ok  : config /etc/ld.so.conf.d/cuda-system.conf
+
+[1;36m[install-nv][0m verify ok  : config /etc/apt/sources.list.d/00-nvidia-bundle.list
+
+[1;36m[install-nv][0m verify ok  : config /etc/apt/preferences.d/99-nvidia-prefer-bundle
+
+[1;36m[install-nv][0m verify ok  : service nvidia-fabricmanager enabled
+
+[1;36m[install-nv][0m verify ok  : service nvidia-persistenced enabled
+
+[1;36m[install-nv][0m verify ok  : apt-mark hold applied to 33 package(s)
+
+[1;36m[install-nv][0m verify ok  : nvcc at /usr/local/cuda/bin/nvcc (release 13.0)
+
+
+
+[1;35m══ 10. Done — reboot required ══[0m
+
+[1;36m[install-nv][0m 
+
+[1;36m[install-nv][0m   driver  : 580.159.04-1ubuntu1
+
+[1;36m[install-nv][0m   fm      : 580.159.04-1ubuntu1
+
+[1;36m[install-nv][0m   nvlsm   : 2025.10.12-1
+
+[1;36m[install-nv][0m   cuda    : 13.0.88-1
+
+[1;36m[install-nv][0m   nccl    : skipped
+
+[1;36m[install-nv][0m   log     : /home/leesihun/installation/install-nvidia-20260526T041449Z.log
+
+[1;36m[install-nv][0m   held    : /var/lib/install-nvidia/nvidia-held.txt (33 pkgs)
+
+[1;36m[install-nv][0m 
+
+[1;36m[install-nv][0m Rebooting...

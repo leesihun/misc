@@ -198,12 +198,35 @@ fi
 step "3. NVSwitch fabric"
 
 check_service "nvidia-fabricmanager" 1
-# nvidia-nvlsm: some R580 builds expose it as a separate systemd unit, others
-# spawn nvlsm as a child of nvidia-fabricmanager. We can't make the unit
-# required globally — but we DO require the `nvlsm` process below (line ~250),
-# which is the authoritative check regardless of unit-vs-child packaging.
-check_service "nvidia-nvlsm" 0
+# R580 Fabric Manager on NVL5+ starts NVLSM through
+# nvidia-fabricmanager-start.sh. A legacy custom nvidia-nvlsm.service from an
+# older installer revision races that wrapper, so the authoritative check is
+# the nvlsm process below, not a standalone systemd unit.
+if systemctl cat nvidia-nvlsm.service >/dev/null 2>&1; then
+    if [[ -f /etc/systemd/system/nvidia-nvlsm.service ]] \
+            && grep -q 'Installed by install-nvidia.sh' /etc/systemd/system/nvidia-nvlsm.service; then
+        record "service: nvidia-nvlsm" FAIL "legacy custom unit present — remove it and let nvidia-fabricmanager own NVLSM"
+    else
+        check_service "nvidia-nvlsm" 0
+    fi
+else
+    record "service: nvidia-nvlsm" SKIP "Fabric Manager wrapper owns NVLSM on this build"
+fi
 check_service "nvidia-persistenced" 1
+
+if (( EXPECTED_GPUS > 1 )) && [[ "${ALLOW_NO_FABRIC:-0}" != "1" ]]; then
+    if lsmod 2>/dev/null | awk '$1 == "ib_umad" {f=1} END {exit !f}'; then
+        record "kmod: ib_umad" PASS "loaded"
+    else
+        record "kmod: ib_umad" FAIL "not loaded — NVLSM/OpenSM cannot use UMAD"
+    fi
+    IB_UMAD_CONF=/etc/modules-load.d/ib-umad.conf
+    if [[ -r "$IB_UMAD_CONF" ]] && grep -qE '^[[:space:]]*ib_umad[[:space:]]*$' "$IB_UMAD_CONF"; then
+        record "config: ib_umad autoload" PASS "$IB_UMAD_CONF"
+    else
+        record "config: ib_umad autoload" FAIL "$IB_UMAD_CONF missing or empty — Fabric Manager may fail after reboot"
+    fi
+fi
 
 if command -v nv-fabricmanager >/dev/null 2>&1; then
     fm_ver=$(nv-fabricmanager -v 2>&1 | head -1)
@@ -286,9 +309,14 @@ if lsmod 2>/dev/null | awk '$1 == "nvidia_peermem" {f=1} END {exit !f}'; then
     record "kmod: nvidia_peermem" PASS "loaded — GPUDirect RDMA ready"
 else
     # Strict: peermem absence is the canary for the DOCA/driver ordering bug
-    # (forum 370357 — "Invalid argument" on mlx5_core bind). On a B300 box
-    # with ConnectX NICs this MUST be loaded after the first reboot.
-    record "kmod: nvidia_peermem" FAIL "not loaded — DOCA/driver ordering bug or peermem build failed; check dmesg for mlx5_core bind errors"
+    # (forum 370357 — "Invalid argument" on mlx5_core bind) or missing RDMA
+    # peer-memory exports from ib_core.
+    if ! grep -qw 'ib_register_peer_memory_client' /proc/kallsyms 2>/dev/null \
+            || ! grep -qw 'ib_unregister_peer_memory_client' /proc/kallsyms 2>/dev/null; then
+        record "kmod: nvidia_peermem" FAIL "not loaded — active ib_core lacks peer-memory symbols; repair DOCA-OFED then rebuild/reinstall NVIDIA DKMS"
+    else
+        record "kmod: nvidia_peermem" FAIL "not loaded — check dmesg for nvidia_peermem/mlx5_core bind errors"
+    fi
 fi
 # nvidia-peermem.ko ships transitively with nvidia-driver-*-open; install-nvidia.sh
 # writes /etc/modules-load.d/nvidia-peermem.conf for boot-time autoload. There is no
@@ -354,7 +382,15 @@ nccl_state=$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}\n' libnccl2 2>/dev
 if [[ -n "$nccl_state" ]]; then
     nccl_ver="${nccl_state##*|}"
     if [[ "$nccl_ver" == *"+cuda${CUDA_MAJOR}.${CUDA_MINOR}" ]]; then
-        record "dpkg: libnccl2" PASS "$nccl_ver"
+        # Suffix matches; now enforce the B300-stable minimum version.
+        # Version layout is "X.Y.Z-N+cuda13.0" — strip everything from the
+        # first '-' onward to get the bare X.Y.Z for sort -V.
+        nccl_base="${nccl_ver%%-*}"
+        if printf '%s\n%s\n' "$NCCL_MIN_VER" "$nccl_base" | sort -V -C 2>/dev/null; then
+            record "dpkg: libnccl2" PASS "$nccl_ver (>= ${NCCL_MIN_VER})"
+        else
+            record "dpkg: libnccl2" FAIL "$nccl_ver below NCCL_MIN_VER=${NCCL_MIN_VER} — TP>1 AllReduce deadlocks on B300 (vllm #28283/#33041/#20862)"
+        fi
     else
         record "dpkg: libnccl2" FAIL "$nccl_ver (expected +cuda${CUDA_MAJOR}.${CUDA_MINOR})"
     fi
@@ -431,23 +467,25 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
         fi
     fi
 
-    # (b) PCIe link generation + width per GPU. Expect Gen5 x16 on B300.
-    # nvidia-smi reports `gen` as the negotiated PCIe gen number (5), `width`
-    # as the negotiated lane count (16). On a slot reseat issue or BIOS
-    # misconfig this can drop to Gen4 x16 or Gen5 x8 — workload still runs,
-    # just at half host bandwidth.
+    # (b) PCIe link generation + width per GPU. Require >= Gen5 x16 on B300.
+    # nvidia-smi reports `gen` as the negotiated PCIe gen number, `width` as
+    # the negotiated lane count. B300 boards advertise Gen6 capability, so a
+    # strict `gen == 5` check would FAIL on a healthy board. We require
+    # >= Gen5 to flag genuine downgrades (BIOS misconfig dropping to Gen4 or
+    # a slot reseat issue dropping to x8) without rejecting Gen6 links.
     pcie_data=$(nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv,noheader,nounits 2>/dev/null)
     if [[ -n "$pcie_data" ]]; then
         bad_pcie=$(printf '%s\n' "$pcie_data" | awk -F',' '
             { gsub(/ /, "", $1); gsub(/ /, "", $2)
-              if ($1 != "5" || $2 != "16") n++ }
+              if ($1+0 < 5 || $2 != "16") n++ }
             END { print n+0 }')
         total_pcie=$(printf '%s\n' "$pcie_data" | grep -c .)
         if (( bad_pcie == 0 )); then
-            record "PCIe Gen5 x16 (per GPU)" PASS "all $total_pcie GPU(s) at Gen5 x16"
+            sample=$(printf '%s\n' "$pcie_data" | awk -F',' 'NR==1 {gsub(/ /, ""); print $1"x"$2}')
+            record "PCIe Gen5+ x16 (per GPU)" PASS "all $total_pcie GPU(s) at >=Gen5 x16 (e.g. Gen${sample})"
         else
             sample=$(printf '%s\n' "$pcie_data" | awk -F',' 'NR==1 {gsub(/ /, ""); print $1"x"$2}')
-            record "PCIe Gen5 x16 (per GPU)" FAIL "$bad_pcie/$total_pcie GPU(s) below Gen5 x16 (e.g. Gen${sample})"
+            record "PCIe Gen5+ x16 (per GPU)" FAIL "$bad_pcie/$total_pcie GPU(s) below Gen5 x16 (e.g. Gen${sample})"
         fi
     fi
 
@@ -472,7 +510,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
             record "NVLink lanes per GPU" FAIL "no NVLink data in nvlink --status — fabric did not enumerate links; check dmesg for NVLink/NVSwitch errors"
         else
             mismatched=$(printf '%s\n' "$per_gpu_counts" \
-                | awk -v exp="$expected_lanes" '$1 != exp { n++ } END { print n+0 }')
+                | awk -v want="$expected_lanes" '$1 != want { n++ } END { print n+0 }')
             min_lanes=$(printf '%s\n' "$per_gpu_counts" | sort -n | head -1)
             if (( mismatched == 0 )); then
                 record "NVLink lanes per GPU" PASS "$gpu_count_with_nvl GPU(s) × $expected_lanes active lanes"
@@ -497,9 +535,13 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     # restricts multi-process GPU sharing; for normal LLM training/inference
     # we want it OFF. Query may exit non-zero on older drivers; treat as SKIP.
     if cc_out=$(nvidia-smi conf-compute -f 2>&1); then
-        if printf '%s' "$cc_out" | grep -qiE 'mode.*off|disabled|protected mode\s*:\s*off'; then
+        # R580 emits "CC status: OFF" (no "mode" word, no "protected mode"
+        # prefix). The legacy patterns covered older drivers; add the
+        # CC-status form so OFF is recognized as PASS rather than falling
+        # through to the "could not parse" FAIL branch.
+        if printf '%s' "$cc_out" | grep -qiE 'mode.*off|protected mode\s*:\s*off|cc status\s*:\s*off|(^|[^a-z])disabled([^a-z]|$)'; then
             record "Confidential Computing OFF" PASS "$(printf '%s' "$cc_out" | head -1 | tr -d '\r')"
-        elif printf '%s' "$cc_out" | grep -qiE 'mode.*on|enabled|protected mode\s*:\s*on'; then
+        elif printf '%s' "$cc_out" | grep -qiE 'mode.*on|protected mode\s*:\s*on|cc status\s*:\s*on|(^|[^a-z])enabled([^a-z]|$)'; then
             record "Confidential Computing OFF" FAIL "$(printf '%s' "$cc_out" | head -1 | tr -d '\r') — disable: nvidia-smi conf-compute -srs 0"
         else
             # Strict: unparseable output means we cannot prove CC is off.
