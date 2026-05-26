@@ -73,8 +73,10 @@ INSTALL_INFERENCE="${INSTALL_INFERENCE:-1}"
 INSTALL_TRAINING="${INSTALL_TRAINING:-1}"
 INSTALL_JUPYTER="${INSTALL_JUPYTER:-1}"
 INSTALL_LLAMA="${INSTALL_LLAMA:-1}"
-INSTALL_VLLM="${INSTALL_VLLM:-0}"
 INSTALL_DESKTOP="${INSTALL_DESKTOP:-1}"
+# INSTALL_VLLM is intentionally NOT exposed. The inference venv is now a
+# CPU-only RAG/FastAPI/langchain stack — no torch, no vLLM. See
+# 11-venv-inference.sh for the current scope.
 
 # B300 = sm_103 (Blackwell Ultra). 100 covers B200 in mixed fleets.
 # Use -real to strip PTX — host is fixed-hardware (B200/B300 only).
@@ -165,6 +167,40 @@ mark_step_ok() {
     : > "$STEPS_DIR/${STEP_NAME}.ok" 2>/dev/null || true
     rm -f "$STEPS_DIR/${STEP_NAME}.failed" 2>/dev/null || true
     printf '%s[step]%s %s ok\n' "$_C_LOG" "$_C_OFF" "$STEP_NAME"
+}
+
+# ── Reboot checkpoint ───────────────────────────────────────────────────────
+# Force a deliberate reboot break after a phase that ran successfully. Pattern:
+#
+#   mark_step_ok       # write the .ok marker FIRST so re-run skips this step
+#   checkpoint_reboot "<one-line rationale>"
+#
+# The launcher catches exit 75 and prints a banner directing the operator to
+# reboot. Re-running install-all.sh after reboot skips this .ok step and
+# resumes at the next pending one. Set SKIP_CHECKPOINTS=1 to bypass (NOT
+# recommended on B300 — see CLAUDE.md "Many reboots are good").
+checkpoint_reboot() {
+    local reason="${1:-phase boundary}"
+    if [[ "${SKIP_CHECKPOINTS:-0}" == "1" ]]; then
+        log "SKIP_CHECKPOINTS=1 — bypassing reboot break ($reason)"
+        return 0
+    fi
+    printf '\n%s================================================================%s\n' "$_C_WARN" "$_C_OFF"
+    printf '%s  REBOOT CHECKPOINT — %s%s\n' "$_C_WARN" "$STEP_NAME" "$_C_OFF"
+    printf '%s================================================================%s\n' "$_C_WARN" "$_C_OFF"
+    printf '  Reason : %s\n' "$reason"
+    if [[ -f /run/reboot-required ]]; then
+        printf '  /run/reboot-required is SET\n'
+        if [[ -r /run/reboot-required.pkgs ]]; then
+            printf '  Triggered by: %s\n' "$(tr '\n' ' ' < /run/reboot-required.pkgs)"
+        fi
+    fi
+    printf '\n  Next:\n'
+    printf '    sudo reboot\n'
+    printf '    # after reboot, verify and resume:\n'
+    printf '    sudo bash test-nvidia.sh\n'
+    printf '    sudo bash install-all.sh   # picks up at next pending step\n\n'
+    exit 75
 }
 
 # Step skip helper: invoked by the launcher only.

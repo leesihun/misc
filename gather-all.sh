@@ -15,7 +15,7 @@
 #     - Userland apt packages (~25 + GUI runtime libs + xfce4/xrdp): build
 #       tools, htop/nvtop/tmux, network utils, python3.12-venv/dev, etc.
 #     - VS Code, Chrome, Firefox, Node.js LTS, Bun, Opencode
-#     - Python wheels (cu130): inference (vLLM), training (PyG + Huni projects),
+#     - Python wheels: inference (CPU-only RAG/FastAPI), training (cu130 + PyG + Huni projects),
 #       jupyter (data science), llama.cpp utility scripts
 #     - llama.cpp source (built on target against the NVIDIA bundle's nvcc 13.0)
 #
@@ -67,7 +67,8 @@ PYTHON_BIN="${PYTHON_BIN:-python${PYTHON_VER}}"
 #   https://data.pyg.org/whl/torch-2.11.0+cu130.html
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 TORCH_CUDA_TAG="${TORCH_CUDA_TAG:-cu130}"
-TORCH_VER_INFERENCE="${TORCH_VER_INFERENCE:-2.11.0}"
+# Inference venv no longer ships torch (see step 11 / wheels section 6 below).
+# TORCH_VER_TRAINING is still used by the training venv (step 12).
 TORCH_VER_TRAINING="${TORCH_VER_TRAINING:-2.11.0}"
 
 # App URLs
@@ -85,9 +86,10 @@ NODE_LTS_MAJOR="${NODE_LTS_MAJOR:-22}"
 # Bun
 BUN_VER="${BUN_VER:-latest}"
 
-# vLLM ??empty means "latest from PyPI". The PyPI default occasionally pulls
-# cu129 wheels; the installer pins --torch-backend=cu130 at install time.
-VLLM_VER="${VLLM_VER:-}"
+# vLLM is no longer bundled. The inference venv (step 11) is CPU-only.
+# Keeping this stub commented for archaeology — do NOT re-enable without
+# revisiting the multi-GPU NCCL ABI footgun (#15525, #20862, #28283).
+# VLLM_VER="${VLLM_VER:-}"
 
 # llama.cpp source (built on target against vendor's nvcc)
 LLAMA_REPO="${LLAMA_REPO:-https://github.com/ggml-org/llama.cpp.git}"
@@ -317,10 +319,9 @@ BUNDLE_OS_VERSION=$VERSION_ID
 BUNDLE_TARGET_OS=$TARGET_OS_VERSION
 BUNDLE_ARCH=$(dpkg --print-architecture)
 BUNDLE_PYTHON=$PYTHON_VER
-BUNDLE_TORCH_INFERENCE=$TORCH_VER_INFERENCE
 BUNDLE_TORCH_TRAINING=$TORCH_VER_TRAINING
 BUNDLE_TORCH_CUDA=$TORCH_CUDA_TAG
-BUNDLE_VLLM_VER=${VLLM_VER:-latest}
+BUNDLE_INFERENCE_VENV=cpu-only-rag
 BUNDLE_NODE_LTS_MAJOR=$NODE_LTS_MAJOR
 BUNDLE_INSTALL_DESKTOP=$INSTALL_DESKTOP
 BUNDLE_INCLUDE_JUPYTER=$INCLUDE_JUPYTER
@@ -601,6 +602,42 @@ while IFS= read -r pkg; do
         || printf '%s\n' "$pkg" >> "$OUT_DIR/meta/apt-closure-download-failed.txt"
 done < "$OUT_DIR/meta/apt-closure-download.txt"
 
+# Closure integrity (mirrors gather-nvidia.sh's pattern):
+#   apt-closure-unresolved.txt — virtual names with no concrete provider;
+#     usually harmless (sibling concrete deb satisfies the virtual at
+#     install time). Warn, don't die.
+#   apt-closure-download-failed.txt — concrete .deb that wouldn't download
+#     after retries. The target install will hit "unable to locate package"
+#     unless we catch it here. Die unless GATHER_ALLOW_CLOSURE_FAILURES=1.
+# Note: gather-all.sh has a separate "critical packages" check below
+# (line ~626) that catches a hand-picked subset; this earlier check fires
+# more broadly so non-critical-but-still-needed transitive failures don't
+# slip through.
+GATHER_ALLOW_CLOSURE_FAILURES="${GATHER_ALLOW_CLOSURE_FAILURES:-0}"
+_unresolved_count=0
+if [[ -s "$OUT_DIR/meta/apt-closure-unresolved.txt" ]]; then
+    _unresolved_count=$(wc -l < "$OUT_DIR/meta/apt-closure-unresolved.txt" | tr -d ' ')
+fi
+_failed_count=0
+if [[ -s "$OUT_DIR/meta/apt-closure-download-failed.txt" ]]; then
+    _failed_count=$(wc -l < "$OUT_DIR/meta/apt-closure-download-failed.txt" | tr -d ' ')
+fi
+if (( _unresolved_count > 0 )); then
+    warn "$_unresolved_count virtual package(s) in meta/apt-closure-unresolved.txt have no concrete candidate."
+    warn "These are usually fine. Inspect: cat $OUT_DIR/meta/apt-closure-unresolved.txt"
+fi
+if (( _failed_count > 0 )); then
+    warn "$_failed_count concrete package(s) in meta/apt-closure-download-failed.txt failed to download."
+    warn "Inspect:"
+    warn "  cat $OUT_DIR/meta/apt-closure-download-failed.txt"
+    warn "  cat $OUT_DIR/meta/apt-download-errors.log"
+    if [[ "$GATHER_ALLOW_CLOSURE_FAILURES" == "1" ]]; then
+        warn "GATHER_ALLOW_CLOSURE_FAILURES=1 — packaging despite missing concrete .debs (forensic mode)."
+    else
+        die "Refusing to package a bundle with missing concrete .debs. Set GATHER_ALLOW_CLOSURE_FAILURES=1 only after auditing the failed list."
+    fi
+fi
+
 # Copy what --download-only already cached
 shopt -s nullglob
 debs=("$APT_STAGE_ARCHIVES_DIR"/*.deb)
@@ -822,9 +859,15 @@ echo "$BUN_TAG" > "$OUT_DIR/apps/bun.version"
 log "Bun: $(du -sh "$OUT_DIR/apps/bun-linux-x64.zip" | cut -f1)"
 
 # ============================================================================
-# 6) PYTHON WHEELS ??LLM Inference (vLLM, FastAPI, LLM_API_fast)
+# 6) PYTHON WHEELS — Inference (CPU-only RAG/FastAPI/langchain)
+#
+# Historically this wheelhouse shipped torch (cu130) + vLLM. Both have been
+# removed: their presence alongside the training venv caused multi-GPU NCCL
+# ABI skew (#15525, #20862, #28283). The inference venv (step 11) is now a
+# pure CPU stack — request routing + RAG + embedding loading — that talks to
+# llama.cpp's HTTP server (built in step 14) for GPU inference.
 # ============================================================================
-step "Python wheels: Inference (torch ${TORCH_VER_INFERENCE}+${TORCH_CUDA_TAG})"
+step "Python wheels: Inference (CPU-only RAG/FastAPI; no torch, no vLLM)"
 
 VENV_INF="$(mktemp -d)/venv"
 "$PYTHON_BIN" -m venv "$VENV_INF"
@@ -833,31 +876,11 @@ source "$VENV_INF/bin/activate"
 pip install --upgrade pip wheel setuptools
 pip download --dest "$OUT_DIR/wheels/inference" pip wheel setuptools
 
-log "Downloading torch==${TORCH_VER_INFERENCE}+${TORCH_CUDA_TAG} + torchvision + torchaudio"
-pip download --dest "$OUT_DIR/wheels/inference" \
-    --index-url "$TORCH_INDEX" \
-    "torch==${TORCH_VER_INFERENCE}" torchvision torchaudio \
-    || die "Failed to download torch==${TORCH_VER_INFERENCE} from $TORCH_INDEX"
-
-_vllm_pkg="vllm"; [[ -n "$VLLM_VER" ]] && _vllm_pkg="vllm==${VLLM_VER}"
-log "Downloading $_vllm_pkg (large, multi-GB)"
-# Force resolution against the cu130 index so vLLM picks the cu130 PyTorch
-# variant. Installer pins --torch-backend=cu130 too.
-pip download --dest "$OUT_DIR/wheels/inference" \
-    --index-url "$TORCH_INDEX" \
-    --extra-index-url https://pypi.org/simple \
-    "$_vllm_pkg" \
-    || warn "vLLM download failed; check network."
-
-# Same exclusion list used for training requirements at line ~931. Drop:
-#   - Windows-only (pyreadline3)
-#   - PyPI-deprecated/renamed (langchain-classic, xlwt)
-#   - host-only tools that aren't useful in the airgap venv (aider-chat, pyinstaller, pip-system-certs)
-#   - sdists that need a CUDA toolchain to build at install time (llama-cpp-python)
-#     ^ llama.cpp itself is built from source on the target, so this Python
-#       binding isn't needed; if a user wants it, build it manually after
-#       sourcing /etc/profile.d/cuda.sh.
-_INF_REQ_EXCLUDE_RE='^\s*#|^\s*$|^torch$|^torchvision$|^torchaudio$|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs'
+# Strip torch/torchvision/torchaudio AND vllm from any pre-existing project
+# requirements files — those wheels intentionally do not live in this
+# wheelhouse anymore. Also drop Windows-only / deprecated / dev-host
+# packages and sdists that need a CUDA toolchain at install time.
+_INF_REQ_EXCLUDE_RE='^\s*#|^\s*$|^torch$|^torchvision$|^torchaudio$|^vllm$|^vllm[\[<>=]|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs'
 
 if [[ -n "$LLMAPI_REQ" && -f "$LLMAPI_REQ" ]]; then
     cp "$LLMAPI_REQ" "$OUT_DIR/requirements/llm_api.txt"
@@ -872,7 +895,7 @@ if [[ -n "$LLMAPI_FULL_REQ" && -f "$LLMAPI_FULL_REQ" ]]; then
         || warn "Some LLM_API_full packages failed."
 fi
 
-log "Downloading core inference / RAG wheels"
+log "Downloading core inference / RAG wheels (CPU-only)"
 pip download --dest "$OUT_DIR/wheels/inference" \
     sentence-transformers faiss-cpu rank-bm25 \
     transformers tokenizers safetensors huggingface-hub tiktoken \

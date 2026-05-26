@@ -68,3 +68,7 @@ if [[ "$INSTALL_DESKTOP" == "1" ]]; then
 fi
 
 mark_step_ok
+# Reboot checkpoint — verify the apt churn (toolchain + GUI runtime libs +
+# optional xfce4/lightdm) hasn't broken the NVIDIA driver or the boot path
+# before we move on to app debs + tarball apps + needrestart restarts.
+checkpoint_reboot "userland apt install completed; reboot to confirm nvidia.ko still loads and graphical.target doesn't stall boot"

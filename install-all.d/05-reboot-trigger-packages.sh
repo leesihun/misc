@@ -2,12 +2,18 @@
 # ============================================================================
 # install-all.d/05-reboot-trigger-packages.sh
 #
-#   Conditional Stage 1: install only the reboot-triggering packages
-#   (libc6/systemd/dbus/optionally kernel) detected in step 04, then write
-#   the resume marker and ask for a reboot.
+#   STRICT NO-OP ASSERTER.
 #
-#   Idempotent — if step 04 produced an empty trigger list, this step does
-#   nothing and just records ok.
+#   Step 04 hard-refuses any base-OS upgrade (libc6/systemd/dbus/kernel/
+#   firmware/microcode) on top of an already-installed NVIDIA driver. By the
+#   time this step runs, the trigger file MUST be empty. If it isn't, an
+#   earlier rev of step 04 wrote it before the strict gate landed (or someone
+#   manually edited it). Either way, refuse rather than perform a base-OS
+#   apt install — that's the canonical brick path on B300.
+#
+#   Kept as a separate step (not folded into 04) for two reasons:
+#     - Back-compat with the existing $RESUME_MARKER mechanism in install-all.sh
+#     - Explicit step boundary for operators reading the install log
 #
 #   Directly runnable: sudo bash install-all.d/05-reboot-trigger-packages.sh
 # ============================================================================
@@ -21,57 +27,21 @@ init_step "05-reboot-trigger-packages"
 
 TRIGGER_FILE="$STATE_DIR/apt-reboot-triggers.txt"
 
+# Resume marker present means a prior installer run already handled Stage 1;
+# this step is a no-op on the resumed run.
 if [[ -f "$RESUME_MARKER" ]]; then
-    log "Resume marker present — Stage 1 has already run."
+    log "Resume marker present — Stage 1 already handled by a prior run."
     mark_step_ok
     exit 0
 fi
 
-if [[ ! -s "$TRIGGER_FILE" ]]; then
-    log "No reboot triggers (see step 04). Skipping Stage 1."
-    mark_step_ok
-    exit 0
+# Strict: if step 04 emitted any triggers, we refuse. The current 04 should
+# never produce them (it dies first), so a non-empty file here means a stale
+# state directory or a hand-edited trigger list.
+if [[ -s "$TRIGGER_FILE" ]]; then
+    triggers=$(tr '\n' ' ' < "$TRIGGER_FILE" | sed 's/[[:space:]]*$//')
+    die "Refusing to perform base-OS install. Step 04 should have refused first; trigger file '$TRIGGER_FILE' is non-empty: $triggers. Delete the trigger file ONLY after confirming step 04 is the current revision."
 fi
 
-# Read triggers; multiple packages whitespace-separated.
-REBOOT_TRIGGER_HITS=$(tr '\n' ' ' < "$TRIGGER_FILE")
-
-step "Stage 1: install reboot-triggering packages"
-log "Installing: $REBOOT_TRIGGER_HITS"
-# shellcheck disable=SC2086
-apt-get install -y --no-install-recommends --allow-downgrades $REBOOT_TRIGGER_HITS \
-    || die "Stage 1 install failed; aborting before reboot."
-
-# Run needrestart -r a in case the upgrade didn't actually require a reboot
-# after dependency resolution (sometimes apt's simulation is conservative).
-if command -v needrestart >/dev/null 2>&1; then
-    needrestart -r a -q 2>&1 | tail -30 || true
-fi
-
-install -d -m 0755 "$(dirname "$RESUME_MARKER")"
-touch "$RESUME_MARKER"
-
-if [[ ! -f /run/reboot-required ]]; then
-    log "Stage 1 complete; /run/reboot-required not set. Continuing in same run."
-    mark_step_ok
-    exit 0
-fi
-
-cat <<EOM
-
-==============================================================================
-  Stage 1 complete. The system upgraded packages that require a reboot:
-  $(cat /run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')
-
-  ACTION REQUIRED:
-    1. sudo reboot
-    2. After reboot, re-run: sudo bash install-all.sh
-       (the resume marker at $RESUME_MARKER is now set; steps 03–05
-        will short-circuit and the install picks up at step 06.)
-==============================================================================
-
-EOM
-
+log "No base-OS triggers — step 05 is a no-op (clean path)."
 mark_step_ok
-# Exit with a distinguished code so the launcher can render the reboot prompt.
-exit 75

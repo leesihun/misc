@@ -15,13 +15,40 @@ Two independent airgap bundles, run in sequence on the target.
 - `test-all.sh` (target verify)
 
 **Sequence on target (clean Ubuntu 24.04 with DOCA-OFED 3.2+ pre-installed by vendor):**
-1. `sudo bash pre-install-nvidia.sh`
-2. `sudo bash install-nvidia.sh`
-3. `sudo reboot`  ??mandatory
-4. `sudo bash test-nvidia.sh`
-5. `sudo bash pre-install-check.sh`
-6. `sudo bash install-all.sh`
-7. `sudo bash test-all.sh`
+
+The userland phase deliberately fires a `checkpoint_reboot` at the end of
+steps 06, 08, 09 (if desktop), 15, and 17 — each checkpoint exits 75, the
+launcher prints a "REBOOT REQUIRED" banner, the operator reboots, and a
+re-run of `install-all.sh` resumes at the next pending step via the .ok
+marker mechanism. This is intentional: bricking the box is more expensive
+than rebooting it 4-5 times.
+
+```
+1.  sudo bash pre-install-nvidia.sh                   # strict preflight (no /etc writes)
+2.  sudo bash install-nvidia.sh                       # driver + FM + NVLSM + CUDA-min
+3.  sudo reboot                                       # MANDATORY — loads nvidia.ko
+4.  sudo bash test-nvidia.sh                          # fabric Completed? peermem loaded? kmod from running kernel?
+5.  sudo bash pre-install-check.sh                    # strict base-OS gate vs userland bundle
+6.  sudo bash install-all.sh                          # runs 01-06, exits 75 after apt userland
+7.  sudo reboot                                       # confirm nvidia survived apt churn
+8.  sudo bash test-nvidia.sh && bash test-all.sh --phase userland
+9.  sudo bash install-all.sh                          # resumes 07-08, exits 75 after needrestart
+10. sudo reboot                                       # confirm sshd/dbus/polkit came up clean
+11. sudo bash test-all.sh --phase apps
+12. sudo bash install-all.sh                          # resumes 09 only (if INSTALL_DESKTOP=1)
+13. sudo reboot                                       # confirm lightdm doesn't stall graphical.target
+14. sudo bash test-all.sh --phase desktop
+15. sudo bash install-all.sh                          # resumes 10-15, exits 75 after sysctl
+16. sudo reboot                                       # confirm sysctl/THP/limits persist from cold boot
+17. sudo bash install-all.sh                          # resumes 16-17, exits 75 at final-status
+18. sudo reboot                                       # final cold-boot sanity
+19. sudo bash test-nvidia.sh && bash test-all.sh      # full verify
+20. gpu-health-check
+```
+
+**Total mandatory reboots: 5** (one per failure surface). Set `SKIP_CHECKPOINTS=1`
+to bypass the userland reboots — NOT recommended on a box that has bricked
+in prior bring-up attempts.
 
 Sections 1??1 document the **userland bundle**.
 Section 0 (immediately below) documents the **NVIDIA bundle**.
@@ -45,7 +72,7 @@ fetch from the internet on the target.**
 | `pip install … --find-links https://data.pyg.org/whl/torch-2.11.0+cu130.html` | Same wheelhouse — PyG wheels are pre-downloaded into `wheels/training/` |
 | `git clone https://github.com/ggml-org/llama.cpp` | `tar -xzf $BUNDLE_DIR/src/llama.cpp.tar.gz` — source archived at gather time, commit pinned in `meta/target.env` (`BUNDLE_LLAMA_COMMIT`) |
 | `curl https://developer.download.nvidia.com/.../cuda-keyring_1.1-1_all.deb` | Pinned in the NVIDIA bundle; install-nvidia.sh registers the file:// repo, never reaches the internet |
-| `pip install vllm` (PyPI) | Pre-downloaded into `wheels/inference/`; `INSTALL_VLLM=1` opt-in only |
+| `pip install vllm` (PyPI) | **No longer bundled.** The inference venv is CPU-only; GPU inference goes through llama.cpp's HTTP server (step 14). |
 | `nodejs.org` LTS tarball | Pre-staged at `$BUNDLE_DIR/apps/nodejs.tar.xz` |
 | `releases.mozilla.org` Firefox tarball | Pre-staged at `$BUNDLE_DIR/apps/firefox.tar.xz` |
 | `update.code.visualstudio.com/.../linux-deb-x64/stable` | Pre-staged at `$BUNDLE_DIR/apps/vscode.deb` |
@@ -118,7 +145,7 @@ Plus the full transitive .deb closure via `apt-rdepends`. Bundle size: **~2?? GB
 | `nvidia-fabricmanager.service` | NVSwitch routing config + spawns NVLSM daemon as child process |
 | `nvidia-persistenced.service` | Persistence mode (no init cost between job runs) |
 | `nvidia-dcgm.service` | DCGM telemetry / health monitoring |
-| `nvidia-nvlsm.service` | Only enabled if NVIDIA build ships it as a separate unit |
+| `nvidia-nvlsm.service` | NVLink Subnet Manager. **NVLSM is MANDATORY on B300** (4th-gen NVSwitch needs it for SHARP). On most R580 builds it ships as a separate unit and `install-nvidia.sh` enables it; on a few it spawns as a child of `nvidia-fabricmanager` instead, in which case `pgrep -x nvlsm` is the authoritative liveness check (used by `test-nvidia.sh`). Either way the process MUST be running. |
 
 ### 0.4 Kernel / modules
 
@@ -168,7 +195,7 @@ plus one shared helpers file. Each step writes its own log
 | 08 | `08-tarball-apps.sh` | Firefox, Node.js, Bun, Opencode (tarballs). `needrestart -r a`. |
 | 09 | `09-desktop-xrdp.sh` | xrdp startwm → `startxfce4`, polkit shutdown rules, UFW 3389. Honors `INSTALL_DESKTOP`. |
 | 10 | `10-wheelhouse-manifests.sh` | `generate_wheelhouse_requirements` — emits per-wheelhouse `requirements.txt`. |
-| 11 | `11-venv-inference.sh` | Inference venv at `$INFERENCE_PREFIX/venv` — torch (cu130), optional vLLM, FastAPI + RAG stack. Honors `INSTALL_INFERENCE`, `INSTALL_VLLM`. Pre-warms sm_103 PTX-JIT cache. |
+| 11 | `11-venv-inference.sh` | **CPU-only** inference venv at `$INFERENCE_PREFIX/venv` — FastAPI + langchain + sentence-transformers + RAG stack. **No torch, no vLLM** (both removed; multi-GPU NCCL ABI footgun). Honors `INSTALL_INFERENCE`. GPU inference is the llama.cpp HTTP server (step 14). |
 | 12 | `12-venv-training.sh` | Training venv — torch (cu130), torch-geometric + extensions (pyg_lib, scatter, sparse, cluster; torch_spline_conv unavailable on cu130), SciPy stack. |
 | 13 | `13-venv-jupyter.sh` | JupyterLab venv, ipykernel registration, `~/start-jupyter.sh` launcher. |
 | 14 | `14-llamacpp-build.sh` | llama.cpp build. cmake flags: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. Drops deprecated `LLAMA_CURL`. NCCL link-time auto-disabled because `SKIP_NCCL=1` is the install-nvidia.sh default (intentional). |
@@ -335,15 +362,20 @@ After install: `systemctl reload apparmor` to register Chrome/VS Code AppArmor p
 ## 4. Python venvs (under `/scratch/` by default ??`SCRATCH_ROOT` override available)
 
 ### `/scratch/llm_inference/venv` (INSTALL_INFERENCE=1)
+
+**This venv is CPU-only.** torch (cu130) and vLLM used to live here but were
+removed — their coexistence with the training venv caused multi-GPU NCCL ABI
+skew (vLLM #15525, #20862, #28283). GPU inference is the llama.cpp HTTP
+server (step 14); this venv hosts the FastAPI / langchain / RAG glue around
+it.
+
 **Bootstrap:** pip, wheel, setuptools
 
-**PyTorch stack (cu130):**
-- torch==2.11.0+cu130
-- torchvision
-- torchaudio
-
-**vLLM:**
-- vllm (latest, resolved against cu130 wheel index)
+**(historical, REMOVED — kept for archaeology) PyTorch + vLLM stack:**
+- ~~torch==2.11.0+cu130~~
+- ~~torchvision~~
+- ~~torchaudio~~
+- ~~vllm (latest, resolved against cu130 wheel index)~~
 
 **Transformers / NLP:**
 - transformers, tokenizers, safetensors, huggingface-hub, tiktoken
@@ -574,7 +606,7 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | Node.js | ~120 MB |
 | Bun | ~100 MB |
 | Opencode | ~80 MB |
-| Inference venv (torch + vLLM dominate) | ~7 GB |
+| Inference venv (CPU-only RAG/FastAPI) | ~600 MB |
 | Training venv | ~5 GB |
 | Jupyter venv | ~1 GB |
 | llama.cpp build artifacts | ~3 GB |
@@ -658,7 +690,7 @@ These are things a typical 8x B300 production server might still need ??they're 
 - **`/opt/models` directory** ??referenced in `llama-server@.service` example.env but NOT created. Create manually before using the systemd template.
 - **HuggingFace cache (`HF_HOME`, `TRANSFORMERS_CACHE`)** ??not set. Defaults to `~/.cache/huggingface/`. For shared model storage, point all users at `/scratch/hf-cache` via `/etc/profile.d/`.
 - **`huggingface-cli login` / `HF_TOKEN`** ??must be done manually per user. The `huggingface-hub` CLI ships with the inference venv.
-- **vLLM cache (`VLLM_CACHE_ROOT`)** ??defaults to `~/.cache/vllm/`.
+- ~~**vLLM cache (`VLLM_CACHE_ROOT`)**~~ ??not applicable; vLLM is not installed.
 - **Global `pip.conf`** ??not created. The venvs install offline from `--find-links=` so no index config needed; if you add wheels later, you'll want a `~/.pip/pip.conf` with `--no-index` defaults.
 
 ### 5. Monitoring / observability
@@ -714,7 +746,7 @@ After `install-all.sh` finishes cleanly, the operator should:
 8. If running services as system units, ensure they restart after reboot: `systemctl is-enabled xrdp llama-server@<name> disable-thp-defrag`
 9. (Optional) For bandwidth verification, build nccl-tests manually from `https://github.com/NVIDIA/nccl-tests` against PyTorch's bundled `nvidia-nccl-cu13`, or against host `libnccl2 +cuda13.0` only if you installed it with `SKIP_NCCL=0`.
 10. Set up `HF_HOME` and any other cache env vars in `/etc/profile.d/`
-11. For maximum vLLM performance on B300 NVSwitch, export `NCCL_NVLS_ENABLE=1 NCCL_P2P_LEVEL=NVL` in your job script (these are no longer set globally)
+11. For multi-GPU training jobs that USE NCCL (training venv), export `NCCL_NVLS_ENABLE=1 NCCL_P2P_LEVEL=NVL` in your job script (these are no longer set globally). For llama.cpp / inference workloads NCCL is not on the path.
 12. If you want monitoring: install node_exporter and DCGM exporter (out of scope here)
 13. Reboot once before declaring production-ready (ensures the THP service, sysctl, and any deferred kmod loads come up cleanly from cold start)
 

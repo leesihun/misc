@@ -71,3 +71,8 @@ fi
 
 log "Desktop setup complete. Connect via RDP to port 3389."
 mark_step_ok
+# Reboot checkpoint — lightdm/xrdp/polkit config can hang graphical.target
+# boot on a headless host (lightdm waits ~90s for an X server that never
+# materializes). Reboot now to confirm boot reaches multi-user.target,
+# sshd accepts logins, and xrdp listens on 3389 from a cold start.
+checkpoint_reboot "desktop + xrdp configured; reboot to confirm lightdm doesn't stall boot and xrdp starts on port 3389"

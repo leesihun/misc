@@ -2,8 +2,16 @@
 # ============================================================================
 # install-all.d/11-venv-inference.sh
 #
-#   LLM inference venv at $INFERENCE_PREFIX/venv. Installs torch (cu130),
-#   optional vLLM, FastAPI + RAG stack from the bundled wheelhouse.
+#   CPU-only inference / RAG / FastAPI venv at $INFERENCE_PREFIX/venv.
+#
+#   NO PyTorch (cu130), NO vLLM — those used to live here but caused
+#   GPU-NCCL-ABI footguns alongside the training/llama.cpp stacks. Inference
+#   workloads on this box go through llama.cpp's HTTP server (built in
+#   step 14); this venv exists to host the FastAPI / langchain / RAG /
+#   embedding-loader glue around it.
+#
+#   If you later need a GPU-resident inference engine, build it in its own
+#   venv on top of the training stack (step 12) — do NOT add torch back here.
 #
 #   Directly runnable: sudo bash install-all.d/11-venv-inference.sh
 # ============================================================================
@@ -41,26 +49,17 @@ step "2. Bootstrap pip / wheel / setuptools"
 _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" --upgrade pip wheel setuptools \
     || warn "Bootstrap pip install failed."
 
-step "3. PyTorch (cu130)"
-_as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" torch torchvision torchaudio \
-    || warn "torch install failed."
-
-if [[ "$INSTALL_VLLM" == "1" ]]; then
-    step "4. vLLM (pinned to cu130 backend)"
-    _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" vllm \
-        || warn "vLLM install failed."
-else
-    log "INSTALL_VLLM=0 (default) — skipping vLLM. Re-run with INSTALL_VLLM=1 once stack is validated."
-fi
-
-step "5. Project requirements"
+step "3. Project requirements"
 for rf in "$BUNDLE_DIR/requirements/llm_api.txt" "$BUNDLE_DIR/requirements/llm_api_full.txt"; do
     [[ -f "$rf" ]] || continue
     log "  Installing from $(basename "$rf")"
     _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" -r "$rf" 2>/dev/null || true
 done
 
-step "6. Core inference / RAG packages"
+step "4. Core inference / RAG packages (CPU-only)"
+# NO torch / torchvision / torchaudio / vllm here — those caused multi-GPU
+# NCCL ABI skew when this venv coexisted with the training venv (#15525,
+# #20862, #28283). Inference workloads route through llama.cpp's HTTP server.
 _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" \
     sentence-transformers faiss-cpu rank-bm25 \
     transformers tokenizers safetensors huggingface-hub tiktoken \
@@ -74,32 +73,17 @@ _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" \
     pandas numpy Pillow python-dotenv python-multipart \
     jupyter_client ipykernel filelock tqdm rich 2>/dev/null || true
 
-step "7. Smoke test"
-INSTALL_VLLM="$INSTALL_VLLM" _as_user env INSTALL_VLLM="$INSTALL_VLLM" \
-    "$INFERENCE_PREFIX/venv/bin/python" - <<'PY' || warn "Inference smoke test failed."
-import os
-import torch
-print(f"  torch {torch.__version__}")
-print(f"  CUDA available: {torch.cuda.is_available()}")
-print(f"  Device count:   {torch.cuda.device_count() if torch.cuda.is_available() else 0}")
-if os.environ.get("INSTALL_VLLM") == "1":
+step "5. Smoke test (CPU-only)"
+_as_user "$INFERENCE_PREFIX/venv/bin/python" - <<'PY' || warn "Inference smoke test failed."
+import importlib
+for mod in ("fastapi", "langchain", "sentence_transformers", "transformers", "tiktoken"):
     try:
-        import vllm
-        print(f"  vllm  {vllm.__version__}")
+        m = importlib.import_module(mod)
+        ver = getattr(m, "__version__", "?")
+        print(f"  {mod} {ver}")
     except Exception as e:
-        print(f"  vllm import failed: {e}")
-else:
-    print("  vllm: skipped (INSTALL_VLLM=0)")
+        print(f"  {mod}: import failed: {e}")
 PY
 
-step "8. Pre-warm sm_103 PTX-JIT cache (B300 cubins not in PyTorch 2.11)"
-if _as_user "$INFERENCE_PREFIX/venv/bin/python" -c \
-    "import torch; assert torch.cuda.is_available(); torch.zeros(1, device='cuda').sum().item()" \
-    2>/dev/null; then
-    log "PTX-JIT cache pre-warmed for sm_103"
-else
-    warn "PTX-JIT pre-warm skipped (CUDA not initialized yet?)"
-fi
-
-log "Inference venv ready: $INFERENCE_PREFIX/venv"
+log "Inference venv ready (CPU-only RAG/FastAPI): $INFERENCE_PREFIX/venv"
 mark_step_ok

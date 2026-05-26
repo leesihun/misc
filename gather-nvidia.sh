@@ -63,6 +63,10 @@ SKIP_NCCL="${SKIP_NCCL:-1}"
 CUDA_MAJOR="${CUDA_MAJOR:-13}"
 CUDA_MINOR="${CUDA_MINOR:-0}"
 NCCL_CUDA_SUFFIX="${NCCL_CUDA_SUFFIX:-cuda${CUDA_MAJOR}.${CUDA_MINOR}}"
+# Minimum NCCL major.minor.patch for B300 (Blackwell Ultra). 2.26.x and
+# 2.27.0-2.27.6 deadlock at AllReduce on TP>1 (vllm #28283, #33041, #20862).
+# 2.27.7 is the first stable build for B200/B300; keep this as a hard floor.
+NCCL_MIN_VER="${NCCL_MIN_VER:-2.27.7}"
 
 # Target OS must match gather host for .deb compatibility.
 TARGET_OS_VERSION="${TARGET_OS_VERSION:-$(. /etc/os-release && echo "$VERSION_ID")}"
@@ -224,7 +228,6 @@ if [[ -z "$PIN_DRIVER_VER" ]]; then
     _cand=$(_apt_candidate "$CUDA_DRIVERS_PKG")
     [[ -n "$_cand" && "$_cand" != "(none)" ]] \
         || die "$CUDA_DRIVERS_PKG has no candidate. Check apt sources."
-    # The version string is "580.159.03-0ubuntu0.24.04.1" etc.
     # Strip the apt revision to get the upstream driver version.
     PIN_DRIVER_VER="${_cand%%-*}"
 fi
@@ -289,19 +292,42 @@ log "Driver package : ${DRIVER_PKG}=${DRIVER_PKG_VER}"
 log "Fabric Manager : ${FM_PKG}=${FM_VER}"
 [[ -n "$FM_META_PKG" ]] && log "FM meta        : ${FM_META_PKG}=${FM_META_VER}"
 
-# Pick NCCL version that matches +cuda13.0 suffix.
+# Pick NCCL version that (a) matches +cuda13.0 suffix AND (b) is >= NCCL_MIN_VER.
+# B300-stable NCCL is 2.27.7+cuda13.0 minimum — older 2.26.x / 2.27.0-2.27.6
+# deadlock at AllReduce on TP>1.
 NCCL_VER=""
 if [[ "$SKIP_NCCL" != "1" ]]; then
     # Same SIGPIPE/pipefail caveat as _apt_candidate — drain stdin instead of
-    # exiting early on first match.
-    NCCL_VER=$(apt-cache madison libnccl2 2>/dev/null \
+    # exiting early on first match. Collect ALL matching +cuda13.0 versions
+    # so we can filter by NCCL_MIN_VER below; madison output is newest-first
+    # by convention but we sort -V anyway to be explicit.
+    nccl_candidates=$(apt-cache madison libnccl2 2>/dev/null \
         | awk -F'|' -v sfx="+${NCCL_CUDA_SUFFIX}" '
-            !s { gsub(/^ +| +$/, "", $2); if (index($2, sfx) > 0) { print $2; s=1 } }')
-    if [[ -z "$NCCL_VER" ]]; then
+            { gsub(/^ +| +$/, "", $2); if (index($2, sfx) > 0) print $2 }' \
+        | sort -V -u)
+    if [[ -z "$nccl_candidates" ]]; then
         warn "No libnccl2 with +${NCCL_CUDA_SUFFIX} found. Set SKIP_NCCL=1 to ignore."
         die  "Refusing to bundle a mismatched NCCL — would break CUDA ${CUDA_MAJOR}.${CUDA_MINOR}."
     fi
-    log "NCCL version   : ${NCCL_VER}  (matches +${NCCL_CUDA_SUFFIX})"
+    # Pick the newest candidate whose base version (before the +cudaX.Y) is
+    # >= NCCL_MIN_VER. `sort -V` compares lexicographically by leading
+    # numeric component, so feeding "min\ncand\n" and checking if the order
+    # is unchanged is equivalent to (cand >= min).
+    nccl_ok=""
+    while IFS= read -r cand; do
+        [[ -n "$cand" ]] || continue
+        cand_base="${cand%%-*}"   # strip "-1+cuda13.0" → "2.27.7"
+        if printf '%s\n%s\n' "$NCCL_MIN_VER" "$cand_base" | sort -V -C 2>/dev/null; then
+            nccl_ok="$cand"   # keep updating so we end with the newest match
+        fi
+    done <<<"$nccl_candidates"
+    if [[ -z "$nccl_ok" ]]; then
+        warn "Available +${NCCL_CUDA_SUFFIX} versions (newest last):"
+        printf '    %s\n' $nccl_candidates >&2
+        die "No libnccl2 +${NCCL_CUDA_SUFFIX} meets the B300 minimum NCCL_MIN_VER=${NCCL_MIN_VER}. Update the upstream NCCL mirror, then re-run."
+    fi
+    NCCL_VER="$nccl_ok"
+    log "NCCL version   : ${NCCL_VER}  (matches +${NCCL_CUDA_SUFFIX}, >= ${NCCL_MIN_VER})"
 else
     log "NCCL           : SKIPPED (SKIP_NCCL=1)"
 fi
@@ -632,7 +658,6 @@ shopt -u nullglob
 #
 # What we DON'T check (legitimately may differ from $PIN_DRIVER_VER):
 #   nvidia-firmware-580-* — NVIDIA encodes the firmware version in the
-#     PACKAGE NAME (e.g. nvidia-firmware-580-server-580.159.03), with a
 #     mundane Version field like 0ubuntu0.24.04.1. A .04 driver legitimately
 #     Depend:s on the .03 firmware package when firmware didn't need a bump.
 #   nvidia-modprobe / nvidia-settings / libxnvctrl* / nvidia-prime — these

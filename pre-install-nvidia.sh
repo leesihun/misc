@@ -142,6 +142,38 @@ else
     red_fail N02 "kernel modules tree" "/lib/modules/$KERNEL_VER missing — DKMS/peermem will fail"
 fi
 
+# N02B — pending reboot from a prior apt run. If a base-OS update (libc6 /
+# systemd / kernel) was installed without rebooting first, install-nvidia.sh
+# would land its driver against the OLD running kernel; on next reboot the
+# new kernel boots without the matching nvidia.ko and the box comes up
+# without GPUs. Canonical silent-fail seen on DGX Spark / B200 after DOCA
+# DKMS upgrades — peermem reports "Invalid argument" on mlx5_core binding.
+# Hard refuse; never let install-nvidia.sh run with a pending reboot.
+if [[ -f /run/reboot-required || -f /var/run/reboot-required ]]; then
+    pending=$( { cat /run/reboot-required.pkgs /var/run/reboot-required.pkgs 2>/dev/null | sort -u | tr '\n' ' '; } | sed 's/[[:space:]]*$//' )
+    red_fail N02B "no pending reboot" "/run/reboot-required is set${pending:+ (pkgs: $pending)} — REBOOT before install-nvidia.sh"
+else
+    red_pass N02B "no pending reboot" "ok"
+fi
+
+# N02C — running kernel == latest installed linux-image-* package. Catches
+# the case where apt upgraded linux-image-* but the box has not rebooted
+# into it yet. Without this gate, install-nvidia.sh's apt install of
+# nvidia-driver-580-open would pull modules for the latest installed kernel,
+# not the running one, and the .ko would refuse to load on next boot.
+latest_kimg=$(dpkg-query -W -f='${Package} ${Version}\n' 'linux-image-*' 2>/dev/null \
+    | awk '$1 ~ /^linux-image-[0-9]/ { sub(/^linux-image-/, "", $1); print $1 }' \
+    | sort -V | tail -1)
+if [[ -z "$latest_kimg" ]]; then
+    # No versioned linux-image-N.M.* packages found at all — exceptional,
+    # but stay strict. We need a concrete kernel to compare against.
+    red_fail N02C "running kernel is latest installed" "no linux-image-N.M.* packages found — cannot verify"
+elif [[ "$latest_kimg" == "$KERNEL_VER" ]]; then
+    red_pass N02C "running kernel is latest installed" "$KERNEL_VER"
+else
+    red_fail N02C "running kernel is latest installed" "running=$KERNEL_VER latest_installed=$latest_kimg — REBOOT then re-run preflight"
+fi
+
 if dpkg-query -W -f='${db:Status-Abbrev}\n' "linux-headers-$KERNEL_VER" 2>/dev/null \
         | grep -q '^ii'; then
     red_pass N03 "linux-headers installed" "linux-headers-$KERNEL_VER"
@@ -158,13 +190,18 @@ if command -v mokutil >/dev/null 2>&1; then
     sb_state=$(mokutil --sb-state 2>/dev/null | head -1)
     case "$sb_state" in
         *enabled*)
-            yel_warn N04 "Secure Boot" "ENABLED — open kmod needs MOK enrollment ($sb_state)" ;;
+            # Strict: with Secure Boot enabled, nvidia-driver-*-open's prebuilt
+            # .ko fails to load without MOK enrollment, which is an interactive
+            # setup we cannot script. Refuse rather than risk a half-installed
+            # driver state on reboot.
+            red_fail N04 "Secure Boot disabled" "ENABLED — open kmod needs MOK enrollment ($sb_state). Disable in firmware before re-running." ;;
         *disabled*)
-            red_pass N04 "Secure Boot" "disabled — no MOK enrollment needed" ;;
-        *) green_info N04 "Secure Boot" "state unknown: $sb_state" ;;
+            red_pass N04 "Secure Boot disabled" "disabled — no MOK enrollment needed" ;;
+        *)  red_fail N04 "Secure Boot disabled" "state unknown: $sb_state — cannot verify" ;;
     esac
 else
-    green_info N04 "Secure Boot" "mokutil not installed; cannot determine"
+    # Strict: without mokutil we cannot prove Secure Boot is off; refuse.
+    red_fail N04 "Secure Boot disabled" "mokutil not installed — cannot determine SB state; install mokutil or boot a known-SB-off OS"
 fi
 
 # ============================================================================
@@ -180,13 +217,19 @@ if command -v lspci >/dev/null 2>&1; then
         if (( gpu_count == 8 )); then
             red_pass N06 "GPU count == 8 (HGX/DGX B300)" "$gpu_count"
         else
-            yel_warn N06 "GPU count" "expected 8 for HGX/DGX B300, found $gpu_count"
+            # Strict: this installer targets an 8x B300 box. A different GPU
+            # count means either wrong server or PCIe enumeration failure —
+            # either way the rest of the install (FM topology, NVLSM ports,
+            # tensor split flags in 16-ops) is calibrated to N=8.
+            red_fail N06 "GPU count == 8 (HGX/DGX B300)" "expected 8 for HGX/DGX B300, found $gpu_count"
         fi
         # Blackwell device-id heuristic (B100/B200/B300 use a range of 2BXX/2DXX ids).
         if printf '%s\n' "$gpu_lines" | grep -qiE '2[bd][0-9a-f]{2}'; then
             green_info N07 "Blackwell device-id" "matched pattern (2BXX/2DXX)"
         else
-            yel_warn N07 "Blackwell device-id" "did not match — verify GPU model is B300"
+            # Strict: if the GPUs aren't Blackwell, R580+sm_103 selections are
+            # wrong end-to-end (driver branch, CUDA arch list, NCCL pin).
+            red_fail N07 "Blackwell device-id" "no 2BXX/2DXX device-id matched — these are NOT Blackwell GPUs; this bundle is for B300"
         fi
     else
         red_fail N05 "NVIDIA GPUs detected" "no 10de: devices found by lspci"
@@ -206,7 +249,10 @@ nvsw_count=$(lspci -d 10de: 2>/dev/null | grep -ciE 'NVSwitch|NVLink' || true)
 if (( nvsw_count > 0 )); then
     green_info N08 "NVSwitch / NVLink devices" "$nvsw_count entry(ies) — fabric manager required"
 else
-    yel_warn N08 "NVSwitch / NVLink devices" "lspci did not match NVSwitch/NVLink string — verify hardware"
+    # Strict: HGX B300 must expose NVSwitch via lspci. Absence means either
+    # the NVSwitch is firmware-broken or this is the wrong server SKU.
+    # FabricManager will fail to initialize without it.
+    red_fail N08 "NVSwitch / NVLink devices" "lspci shows no NVSwitch/NVLink — wrong server or NVSwitch fw issue; FabricManager will fail"
 fi
 
 # ============================================================================
@@ -225,7 +271,11 @@ if command -v ofed_info >/dev/null 2>&1; then
         if [[ -n "$ofed_major" ]] && (( ofed_major >= 25 )); then
             red_pass N10 "OFED >= 25.10 (DOCA 3.2+)" "$ofed_n"
         else
-            yel_warn N10 "OFED >= 25.10 (DOCA 3.2+)" "found $ofed_n — peermem may be unstable on R580"
+            # Strict: nvidia-peermem on R580 needs the DOCA 3.2+ mlx5_core ABI;
+            # older MOFED produces the "Invalid argument" failure at module
+            # bind time, which silently disables GPUDirect RDMA across the
+            # fabric. Refuse rather than ship a half-working RDMA path.
+            red_fail N10 "OFED >= 25.10 (DOCA 3.2+)" "found $ofed_n — peermem ABI unstable; escalate to vendor for DOCA 3.2+"
         fi
     else
         red_fail N09 "OFED installed" "ofed_info present but reports no version"
@@ -263,9 +313,16 @@ _section "N6. No conflicting NVIDIA install"
 if command -v nvidia-smi >/dev/null 2>&1; then
     drv_ver=$(modinfo -F version nvidia 2>/dev/null || true)
     if [[ -n "$drv_ver" ]]; then
-        yel_warn N13 "no existing NVIDIA driver" "found driver $drv_ver — install-nvidia.sh will reinstall on top"
+        # Strict: do not reinstall on top of an existing driver. Mixed-version
+        # leftovers (different driver branch, abandoned DKMS modules, stale
+        # hold marks) are a documented cause of FM "system not initialized"
+        # after reboot. Operator must purge before re-running.
+        red_fail N13 "no existing NVIDIA driver" "found loaded driver $drv_ver — purge with: apt-get purge 'nvidia-*' 'cuda-*' 'libnvidia-*'; apt-get autoremove; then reboot before re-running"
     else
-        green_info N13 "no existing NVIDIA driver" "nvidia-smi present but kmod not loaded"
+        # nvidia-smi binary exists but no kmod loaded — almost always means
+        # a prior install was partial (driver pkg installed, reboot skipped).
+        # Refuse: clean it up first.
+        red_fail N13 "no existing NVIDIA driver" "nvidia-smi present but kmod not loaded — leftover from a partial prior install; purge first"
     fi
 else
     red_pass N13 "no existing NVIDIA driver" "nvidia-smi absent (clean slate)"
@@ -285,7 +342,10 @@ stale_nv=$(dpkg -l 2>/dev/null \
     | awk '$1 == "ii" && ($2 ~ /^nvidia-/ || $2 ~ /^cuda-/ || $2 ~ /^libnvidia/) {print $2}' \
     | grep -vE '^doca-|^libnvhws|^dpa-|^flexio-|^ibarr|^mft|^libnvidia-utils-' || true)
 if [[ -n "$stale_nv" ]]; then
-    yel_warn N15 "no stale NVIDIA packages" "found: $(echo "$stale_nv" | tr '\n' ' ')"
+    # Strict: any installed nvidia-/cuda-/libnvidia- package (outside the
+    # DOCA-shipped allowlist) implies an incomplete prior install. Refuse
+    # rather than let apt's dependency resolver pull mismatched versions.
+    red_fail N15 "no stale NVIDIA packages" "found: $(echo "$stale_nv" | tr '\n' ' ') — purge before re-running"
 else
     red_pass N15 "no stale NVIDIA packages" "clean (DOCA-shipped libnvhws/mft/flexio ignored)"
 fi
@@ -318,9 +378,12 @@ fi
 # Ensure no existing nvidia/cuda apt repo that would conflict with our file://
 existing_nv_lists=$(ls /etc/apt/sources.list.d/ 2>/dev/null | grep -iE 'nvidia|cuda' || true)
 if [[ -n "$existing_nv_lists" ]]; then
-    yel_warn N19 "no existing NVIDIA apt repos" "$(echo "$existing_nv_lists" | tr '\n' ' ')"
+    # Strict: a leftover nvidia/cuda sources.list.d entry on an airgapped box
+    # is a dpkg foot-gun — apt may try to reach an unreachable host and slow
+    # every install, OR (worse) silently pull mismatched versions. Refuse.
+    red_fail N19 "no existing NVIDIA apt repos" "$(echo "$existing_nv_lists" | tr '\n' ' ') — remove these before re-running"
 else
-    green_info N19 "no existing NVIDIA apt repos" "none — clean"
+    red_pass N19 "no existing NVIDIA apt repos" "none — clean"
 fi
 
 # ============================================================================
@@ -342,7 +405,9 @@ else
             red_fail N21 "bundle sha256 matches" "MISMATCH — re-transfer"
         fi
     else
-        yel_warn N21 "bundle sha256 matches" "no .sha256 sidecar; skipping integrity check"
+        # Strict: a missing .sha256 sidecar means we cannot prove the bundle
+        # arrived intact. Bricks are cheaper to avoid than to debug.
+        red_fail N21 "bundle sha256 matches" "no .sha256 sidecar at ${BUNDLE_PATH}.sha256 — re-transfer bundle with its sidecar"
     fi
 
     # ── Inner bundle contract (peek inside the tarball — no extraction) ────
@@ -384,9 +449,12 @@ else
         if [[ "$bundle_cuda" == "13.0" ]]; then
             green_info N25 "bundle CUDA = 13.0" "$bundle_cuda"
         elif [[ -n "$bundle_cuda" ]]; then
-            yel_warn N25 "bundle CUDA = 13.0" "bundle has CUDA=$bundle_cuda (expected 13.0)"
+            # Strict: the cu130 PyTorch/PyG/vLLM/NCCL pin chain is calibrated
+            # to CUDA 13.0 specifically. A different toolkit means wheelhouse
+            # / NCCL ABI mismatches everywhere.
+            red_fail N25 "bundle CUDA = 13.0" "bundle has CUDA=$bundle_cuda (expected 13.0)"
         else
-            yel_warn N25 "bundle CUDA = 13.0" "BUNDLE_CUDA not recorded in meta/target.env"
+            red_fail N25 "bundle CUDA = 13.0" "BUNDLE_CUDA not recorded in meta/target.env — rebuild bundle with current gather-nvidia.sh"
         fi
 
         # Inventory: driver, FM, NCCL versions recorded by gather time.
@@ -423,7 +491,11 @@ else
     if tar -tzf "$BUNDLE_PATH" --wildcards '*meta/SHA256SUMS' >/dev/null 2>&1; then
         red_pass N28 "meta/SHA256SUMS present" "ok (install-nvidia.sh will verify after extract)"
     else
-        yel_warn N28 "meta/SHA256SUMS present" "missing — install-nvidia.sh cannot integrity-check the extracted bundle"
+        # Strict: without inner SHA256SUMS, install-nvidia.sh's per-file
+        # integrity check is bypassed. On an airgapped install, dropped /
+        # corrupted .debs surface as cryptic apt failures during driver
+        # install — we want them caught NOW.
+        red_fail N28 "meta/SHA256SUMS present" "missing — rebuild bundle with current gather-nvidia.sh (writes meta/SHA256SUMS post-gather)"
     fi
 fi
 

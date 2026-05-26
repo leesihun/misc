@@ -597,6 +597,79 @@ else
     red_fail R22 "bundle present" "$BUNDLE_PATH is neither a file nor a directory"
 fi
 
+# R23-baseos — STRICT base-OS version gate.
+#
+# Refuse if the userland bundle's debs/Packages index advertises a libc6 /
+# systemd / dbus / kernel / firmware / microcode version newer than what's
+# installed on this target. Touching any of those AFTER install-nvidia.sh
+# is the canonical brick path on B300 (peermem ABI break, FM "system not
+# initialized", unbootable kernel without nvidia.ko).
+#
+# Mirrors the runtime check in install-all.d/04-apt-plan.sh, but surfaces
+# the failure HERE so the operator sees it before install-all.sh even runs.
+BASE_OS_DANGER='libc6 libc6-dev systemd systemd-sysv dbus dbus-daemon linux-firmware microcode intel-microcode amd64-microcode'
+KERNEL_GLOB_PREFIXES='linux-image- linux-headers-'
+
+# Read debs/Packages from either the extracted dir or the .bin tarball.
+PKG_INDEX_CONTENT=""
+if [[ -d "$BUNDLE_PATH" && -f "$BUNDLE_PATH/debs/Packages" ]]; then
+    PKG_INDEX_CONTENT=$(cat "$BUNDLE_PATH/debs/Packages" 2>/dev/null)
+elif [[ -f "$BUNDLE_PATH" ]]; then
+    PKG_INDEX_CONTENT=$(tar -xzOf "$BUNDLE_PATH" --wildcards '*debs/Packages' 2>/dev/null)
+fi
+
+if [[ -z "$PKG_INDEX_CONTENT" ]]; then
+    # We already failed R23-index above if Packages is missing; surface this
+    # as a separate RED so the base-OS check isn't silently skipped.
+    red_fail R23-baseos "bundle does not upgrade base OS" "debs/Packages unreadable — cannot prove no base-OS upgrade pending"
+else
+    # Build "pkg version" pairs from the apt Packages index.
+    bundle_pairs=$(printf '%s\n' "$PKG_INDEX_CONTENT" \
+        | awk '
+            /^Package: / { pkg=$2; next }
+            /^Version: / && pkg != "" { print pkg, $2; pkg="" }
+        ')
+
+    danger_hits=""
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        bp=${line%% *}; bv=${line##* }
+
+        # Either an explicit base-OS name OR matches a kernel/header prefix.
+        is_danger=0
+        for d in $BASE_OS_DANGER; do
+            [[ "$bp" == "$d" ]] && { is_danger=1; break; }
+        done
+        if (( ! is_danger )); then
+            for p in $KERNEL_GLOB_PREFIXES; do
+                [[ "$bp" == ${p}* ]] && { is_danger=1; break; }
+            done
+        fi
+        (( is_danger )) || continue
+
+        # Compare with installed version (if any). If not installed at all,
+        # apt may pull it as a NEW dep — also a base-OS change, so flag it.
+        installed_ver=$(dpkg-query -W -f='${Version}' "$bp" 2>/dev/null || true)
+        if [[ -z "$installed_ver" ]]; then
+            danger_hits+=$'\n'"  $bp: bundle=$bv installed=<none, would be NEW install>"
+        else
+            # sort -V -C succeeds if input is in ascending order.
+            # "installed\nbundle\n" sorted means installed <= bundle.
+            if printf '%s\n%s\n' "$installed_ver" "$bv" | sort -V -C 2>/dev/null; then
+                if [[ "$installed_ver" != "$bv" ]]; then
+                    danger_hits+=$'\n'"  $bp: bundle=$bv > installed=$installed_ver"
+                fi
+            fi
+        fi
+    done <<<"$bundle_pairs"
+
+    if [[ -z "$danger_hits" ]]; then
+        red_pass R23-baseos "bundle does not upgrade base OS" "libc6/systemd/dbus/kernel/firmware at or above bundle versions"
+    else
+        red_fail R23-baseos "bundle does not upgrade base OS" "would upgrade:$danger_hits — escalate to vendor for baseline match, then re-run from pre-install-nvidia.sh"
+    fi
+fi
+
 # R24 No conflicting existing installs
 existing=()
 for prefix in "/scratch/llm_inference" "/scratch/general_training" "/scratch/jupyter" "/scratch/llama.cpp"; do

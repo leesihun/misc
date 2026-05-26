@@ -30,6 +30,10 @@ CUDA_MAJOR="${CUDA_MAJOR:-13}"
 CUDA_MINOR="${CUDA_MINOR:-0}"
 EXPECTED_GPUS="${EXPECTED_GPUS:-8}"
 SKIP_DCGM="${SKIP_DCGM:-0}"
+# Mirrors gather-nvidia.sh's NCCL_MIN_VER — when libnccl2 is installed on the
+# host (SKIP_NCCL=0 path), refuse < 2.27.7. 2.26.x and 2.27.0-2.27.6 deadlock
+# at AllReduce on TP>1 with Blackwell Ultra (vllm #28283, #33041, #20862).
+NCCL_MIN_VER="${NCCL_MIN_VER:-2.27.7}"
 
 JSON_OUT=0
 while (( $# > 0 )); do
@@ -147,6 +151,21 @@ else
     record "kmod: nvidia loaded" FAIL "not in lsmod — driver not loaded, reboot?"
 fi
 
+# Confirm the loaded nvidia.ko actually lives under /lib/modules/$(uname -r).
+# Stale kmod can persist in memory if the kernel was upgraded after the
+# driver was installed — modinfo will still report a version, but the .ko
+# file on disk is in a different /lib/modules/<kver> tree and on next boot
+# the driver won't load. Catches the kernel-bumped-after-driver-install case.
+RUNNING_KERNEL_FOR_TEST="$(uname -r)"
+NV_KO_PATH=$(modinfo -F filename nvidia 2>/dev/null || true)
+if [[ -z "$NV_KO_PATH" ]]; then
+    record "kmod: nvidia .ko path" FAIL "modinfo -F filename nvidia returned nothing"
+elif [[ "$NV_KO_PATH" == "/lib/modules/${RUNNING_KERNEL_FOR_TEST}"* ]]; then
+    record "kmod: nvidia .ko path" PASS "$NV_KO_PATH"
+else
+    record "kmod: nvidia .ko path" FAIL "$NV_KO_PATH not under /lib/modules/${RUNNING_KERNEL_FOR_TEST} — kernel was upgraded after driver install; reboot will not load nvidia"
+fi
+
 # ============================================================================
 # 2. GPU enumeration
 # ============================================================================
@@ -179,7 +198,11 @@ fi
 step "3. NVSwitch fabric"
 
 check_service "nvidia-fabricmanager" 1
-check_service "nvidia-nvlsm" 0          # optional unit on some builds
+# nvidia-nvlsm: some R580 builds expose it as a separate systemd unit, others
+# spawn nvlsm as a child of nvidia-fabricmanager. We can't make the unit
+# required globally — but we DO require the `nvlsm` process below (line ~250),
+# which is the authoritative check regardless of unit-vs-child packaging.
+check_service "nvidia-nvlsm" 0
 check_service "nvidia-persistenced" 1
 
 if command -v nv-fabricmanager >/dev/null 2>&1; then
@@ -262,7 +285,10 @@ step "4. nvidia-peermem"
 if lsmod 2>/dev/null | awk '$1 == "nvidia_peermem" {f=1} END {exit !f}'; then
     record "kmod: nvidia_peermem" PASS "loaded — GPUDirect RDMA ready"
 else
-    record "kmod: nvidia_peermem" MISSING "not loaded; run: modprobe nvidia-peermem"
+    # Strict: peermem absence is the canary for the DOCA/driver ordering bug
+    # (forum 370357 — "Invalid argument" on mlx5_core bind). On a B300 box
+    # with ConnectX NICs this MUST be loaded after the first reboot.
+    record "kmod: nvidia_peermem" FAIL "not loaded — DOCA/driver ordering bug or peermem build failed; check dmesg for mlx5_core bind errors"
 fi
 # nvidia-peermem.ko ships transitively with nvidia-driver-*-open; install-nvidia.sh
 # writes /etc/modules-load.d/nvidia-peermem.conf for boot-time autoload. There is no
@@ -439,7 +465,11 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
         gpu_count_with_nvl=$(printf '%s\n' "$per_gpu_counts" | grep -c . || true)
         expected_lanes="${EXPECTED_NVLINK_LANES:-18}"
         if (( gpu_count_with_nvl == 0 )); then
-            record "NVLink lanes per GPU" SKIP "no NVLink data in nvlink --status"
+            # Strict: HGX B300 must have NVLink lanes per GPU. Empty output
+            # from `nvlink --status` means fabric init failed silently — Fabric
+            # State may report Completed via a degraded fallback path while
+            # all 18 lanes per GPU are actually down.
+            record "NVLink lanes per GPU" FAIL "no NVLink data in nvlink --status — fabric did not enumerate links; check dmesg for NVLink/NVSwitch errors"
         else
             mismatched=$(printf '%s\n' "$per_gpu_counts" \
                 | awk -v exp="$expected_lanes" '$1 != exp { n++ } END { print n+0 }')
@@ -472,10 +502,15 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
         elif printf '%s' "$cc_out" | grep -qiE 'mode.*on|enabled|protected mode\s*:\s*on'; then
             record "Confidential Computing OFF" FAIL "$(printf '%s' "$cc_out" | head -1 | tr -d '\r') — disable: nvidia-smi conf-compute -srs 0"
         else
-            record "Confidential Computing OFF" SKIP "could not parse: $(printf '%s' "$cc_out" | head -1)"
+            # Strict: unparseable output means we cannot prove CC is off.
+            # Treat as FAIL so the operator confirms manually with
+            # `nvidia-smi conf-compute -f` before proceeding.
+            record "Confidential Computing OFF" FAIL "could not parse: $(printf '%s' "$cc_out" | head -1) — verify manually then rerun"
         fi
     else
-        record "Confidential Computing OFF" SKIP "nvidia-smi conf-compute not supported on this driver"
+        # Driver claims conf-compute not supported. On R580+B300 it IS
+        # supported; absence indicates a driver/kmod mismatch worth catching.
+        record "Confidential Computing OFF" FAIL "nvidia-smi conf-compute returned non-zero — driver may not match this GPU SKU"
     fi
 
     # (f) GPU UUIDs all unique. Duplicates are rare but they break any tool

@@ -97,3 +97,10 @@ fi
 log "System limits applied (pam_limits only; per-service limits live in unit files)"
 
 mark_step_ok
+# Reboot checkpoint — sysctl values, THP=madvise service, and pam_limits
+# all take their FINAL effect at next boot (pam_limits already applies to
+# new sessions, but the THP oneshot only runs at boot, and a bad sysctl
+# value would surface as a boot warning we want to catch now). Reboot
+# verifies the box still comes up clean before we layer operational
+# tooling + the llama-server@.service template on top.
+checkpoint_reboot "sysctl + THP + pam_limits staged; reboot to confirm clean boot with new tuning before installing ops tooling"

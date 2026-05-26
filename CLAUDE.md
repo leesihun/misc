@@ -22,14 +22,42 @@ The installer is split into **two independent bundles**, run in strict sequence 
 
 Canonical target sequence (also documented at the top of [install-all.sh:11-17](install-all.sh#L11-L17)):
 
+**5 mandatory reboots** — one per failure surface. The user has bricked this
+exact target three times in prior bring-up attempts; verification ergonomics
+beat install speed here. Each `install-all.sh` invocation auto-skips
+already-`.ok` steps and resumes at the next pending one. `checkpoint_reboot`
+(defined in [install-all.d/00-common.sh](install-all.d/00-common.sh)) fires
+`exit 75` at the end of steps 06, 08, 09 (if desktop), 15, and 17; the
+launcher catches it and prints a "REBOOT REQUIRED" banner. Set
+`SKIP_CHECKPOINTS=1` to bypass — NOT recommended on this target.
+
 ```
-sudo bash pre-install-nvidia.sh
-sudo bash install-nvidia.sh
-sudo reboot                       # mandatory — loads nvidia.ko + FM/NVLSM
-sudo bash test-nvidia.sh
-sudo bash pre-install-check.sh
-sudo bash install-all.sh
-sudo bash test-all.sh
+# Phase 1 — NVIDIA stack (1 reboot)
+sudo bash pre-install-nvidia.sh                       # strict preflight (no /etc writes)
+sudo bash install-nvidia.sh                           # driver + FM + NVLSM + CUDA-min
+sudo reboot                                           # REBOOT #1 — loads nvidia.ko
+sudo bash test-nvidia.sh                              # fabric Completed? peermem loaded? kmod-from-running-kernel?
+
+# Phase 2 — Userland readiness
+sudo bash pre-install-check.sh                        # strict base-OS gate vs userland bundle
+
+# Phase 3 — Userland install (4 checkpoint reboots)
+sudo bash install-all.sh                              # 01-06; exit 75 after apt userland
+sudo reboot                                           # REBOOT #2 — confirm nvidia survived apt
+sudo bash test-nvidia.sh && bash test-all.sh --phase userland
+sudo bash install-all.sh                              # 07-08; exit 75 after needrestart
+sudo reboot                                           # REBOOT #3 — confirm daemons clean from boot
+sudo bash test-all.sh --phase apps
+sudo bash install-all.sh                              # 09 only (if INSTALL_DESKTOP=1); exit 75
+sudo reboot                                           # REBOOT #4 — confirm lightdm/xrdp boot
+sudo bash test-all.sh --phase desktop
+sudo bash install-all.sh                              # 10-15; exit 75 after sysctl tuning
+sudo reboot                                           # REBOOT #5 — confirm tuning persists
+sudo bash install-all.sh                              # 16-17; exit 75 at final-status
+
+# Phase 4 — Final verify
+sudo bash test-nvidia.sh && bash test-all.sh
+gpu-health-check
 ```
 
 [INSTALL_INVENTORY.md](INSTALL_INVENTORY.md) is the authoritative manifest of every package, venv, systemd unit, config file, sysctl, and limit each phase touches. **Edit it whenever you change what the installers install** — it's not a generated doc, it's the spec.
@@ -46,7 +74,7 @@ sudo bash test-all.sh
   - calls `mark_step_ok` at the end (writes `/var/lib/install-all/steps/NN-name.ok`)
   - per-step log at `/var/log/install-all/<RUN_ID>/NN-name.log`
   - is invocable on its own: `sudo bash install-all.d/14-llamacpp-build.sh`
-  - the only step that may exit non-zero-but-not-failed is `05-reboot-trigger-packages.sh` (exit 75 = reboot requested)
+  - steps 06 / 08 / 09 / 15 / 17 call `checkpoint_reboot` after `mark_step_ok` and exit 75 (reboot requested — launcher catches and prints "REBOOT REQUIRED" banner); 05-reboot-trigger-packages.sh also exits 75 in the legacy stage-1 path, though under the strict base-OS gate it should never reach that branch
 - **`test-*.sh`** — post-install verification. Support `--json`. Exit 0 only if every required check passes. Use the `record name STATUS detail` helper pattern (`PASS|FAIL|MISSING|SKIP`).
 
 ### Hard invariants — don't break these
@@ -58,6 +86,7 @@ sudo bash test-all.sh
 - **CUDA arch list `100-real;103-real`** for B300 (sm_103 Blackwell Ultra) + B200 (sm_100). `-real` strips PTX because the hardware is fixed. Used when building llama.cpp; default in `00-common.sh`.
 - **llama.cpp cmake flags (2026-05 baseline)**: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. **`-DLLAMA_CURL=ON` is deprecated** (llama.cpp #18922, Jan 2026); the OpenSSL path requires `libssl-dev` (present in `gather-all.sh`).
 - **Python 3.12** + **torch 2.11.0+cu130** + PyG cu130 wheels from `data.pyg.org/whl/torch-2.11.0+cu130.html`. Pass `torch==2.11.0` to pip (NOT `torch==2.11.0+cu130` — the `+cu130` suffix is internal to the wheel filename). Don't bump these without updating both gather scripts, both inventory sections, and the cu130 wheel index references.
+- **Inference venv is CPU-only.** [install-all.d/11-venv-inference.sh](install-all.d/11-venv-inference.sh) does NOT install torch, torchvision, torchaudio, or vLLM. Multi-GPU NCCL ABI skew between an inference-venv torch and the training-venv torch was the recurring cause of #15525 / #20862 / #28283. GPU inference lives in llama.cpp's HTTP server (step 14). Do not re-add torch or vLLM to the inference venv or its wheelhouse without solving the NCCL coexistence story first.
 - **Install prefixes default to `/scratch/`** (no `$HOME` dependency). `INFERENCE_PREFIX`, `TRAINING_PREFIX`, `JUPYTER_PREFIX`, `LLAMA_PREFIX` all branch off `SCRATCH_ROOT`.
 - **DOCA-OFED is vendor-installed** — never bundle it; `pre-install-nvidia.sh` only verifies `ofed_info -s` shows DOCA 3.2+.
 - **Bundle variant marker** — `meta/target.env` in the bundle carries `BUNDLE_VARIANT=prepped`. `install-all.sh` refuses to run a bare-metal bundle on a prepped server (and vice versa). Don't remove the gate.

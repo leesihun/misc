@@ -109,3 +109,8 @@ else
 fi
 
 mark_step_ok
+# Reboot checkpoint — needrestart restarted sshd/dbus/polkit etc. in place;
+# a reboot now verifies all those daemons come up cleanly from boot state
+# (not just from a hot in-place restart) and the new Chrome/VS Code/Firefox/
+# Node/Bun binaries link against the post-restart shared libs.
+checkpoint_reboot "app debs + tarballs installed + needrestart fired; reboot to confirm daemons come up clean from boot, sshd accepts logins, nvidia.ko still loads"

@@ -28,9 +28,10 @@
 #   Env knobs (all honored by every step script):
 #     BUNDLE_DIR, BUNDLE_BIN, PYTHON_VER, SCRATCH_ROOT
 #     INSTALL_INFERENCE, INSTALL_TRAINING, INSTALL_JUPYTER, INSTALL_LLAMA
-#     INSTALL_VLLM, INSTALL_DESKTOP
+#     INSTALL_DESKTOP  (inference venv is CPU-only — no INSTALL_VLLM knob)
 #     CUDA_ARCH_LIST (default 100-real;103-real for B200+B300)
 #     BUILD_BLAS, JOBS, FORCE, SKIP_PREFLIGHT
+#     SKIP_CHECKPOINTS=1 to bypass the per-phase reboot breaks (NOT recommended)
 #
 #   Per-step state:
 #     /var/lib/install-all/steps/NN-name.{ok,failed}
@@ -203,7 +204,8 @@ OVERALL_RC=0
 SKIPPED=()
 EXECUTED=()
 FAILED=()
-STAGE1_REBOOT=0
+REBOOT_REQUESTED=0
+REBOOT_STEP=""
 
 for step in "${TO_RUN[@]}"; do
     # Resume-marker skip for 03/04/05.
@@ -231,10 +233,15 @@ for step in "${TO_RUN[@]}"; do
     if (( rc == 0 )); then
         EXECUTED+=( "$step" )
     elif (( rc == 75 )); then
-        # Distinguished code from 05-reboot-trigger-packages.sh — reboot needed.
-        log "Step $step requested a reboot."
+        # Distinguished code: any step that called checkpoint_reboot() in
+        # 00-common.sh, or step 05's legacy Stage-1 reboot, or step 17's
+        # /run/reboot-required gate. Always treated the same way — the step
+        # already wrote its .ok marker, so re-running install-all.sh after
+        # the reboot will resume at the next pending step.
+        log "Step $step requested a reboot (exit 75)."
         EXECUTED+=( "$step" )
-        STAGE1_REBOOT=1
+        REBOOT_REQUESTED=1
+        REBOOT_STEP="$step"
         break
     else
         FAILED+=( "$step" )
@@ -247,8 +254,8 @@ done
 # ── Aggregate diagnostics ───────────────────────────────────────────────────
 printf '\n'
 printf '%s\n' "════════════════════════════════════════════════════════════════"
-if (( STAGE1_REBOOT )); then
-    printf '%s\n' "  STAGE 1 REBOOT REQUIRED"
+if (( REBOOT_REQUESTED )); then
+    printf '  REBOOT REQUIRED — %s reached a phase boundary\n' "$REBOOT_STEP"
 elif (( ${#FAILED[@]} > 0 )); then
     printf '%s\n' "  INSTALL FAILED"
 else
@@ -272,16 +279,18 @@ if [[ -s "$ACC_DIR/errors.log" ]]; then
 fi
 
 printf '\nNext steps:\n'
-if (( STAGE1_REBOOT )); then
+if (( REBOOT_REQUESTED )); then
     printf '  1. sudo reboot\n'
-    printf '  2. sudo bash %s            # picks up at step 06 via resume marker\n' "$0"
+    printf '  2. sudo bash test-nvidia.sh                   # confirm nvidia stack alive\n'
+    printf '  3. sudo bash %s                          # resume at next pending step\n' "$0"
 elif (( ${#FAILED[@]} > 0 )); then
     printf '  Inspect the log for the failed step, then re-run with --rerun NN.\n'
     printf '  Example: sudo bash %s --rerun %s\n' "$0" "${FAILED[0]}"
 else
+    printf '  bash test-nvidia.sh                           # nvidia stack still healthy?\n'
     printf '  bash test-all.sh                              # verify everything\n'
     printf '  gpu-health-check                              # quick fabric sanity\n'
-    printf '  sudo bash %s --list                         # step status\n' "$0"
+    printf '  sudo bash %s --list                       # step status\n' "$0"
 fi
 printf '\n'
 

@@ -100,8 +100,12 @@ else
 fi
 
 step "6. Smoke test"
-"$LLAMA_PREFIX/build/bin/llama-cli" --version 2>&1 | head -3 \
-    && log "llama.cpp OK" \
-    || warn "llama-cli --version failed."
+# Use explicit if/else rather than A && B || C — the latter would incorrectly
+# fire the "failed" warn if the `log` helper itself ever returned non-zero.
+if "$LLAMA_PREFIX/build/bin/llama-cli" --version 2>&1 | head -3; then
+    log "llama.cpp OK"
+else
+    warn "llama-cli --version failed."
+fi
 
 mark_step_ok

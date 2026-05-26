@@ -9,8 +9,19 @@
 #   Python venvs, llama.cpp, and system tuning.
 #
 #   Usage:
-#     bash test-all.sh                    # human-readable
+#     bash test-all.sh                    # human-readable, run every phase
 #     bash test-all.sh --json             # machine-readable
+#     bash test-all.sh --phase userland   # only the userland-apt sections
+#     bash test-all.sh --phase apps       # only browsers + GUI tooling
+#     bash test-all.sh --phase desktop    # only xrdp/xfce4
+#     bash test-all.sh --phase venvs      # only Python venvs + llama.cpp
+#     bash test-all.sh --phase tuning     # only sysctl/limits/ops tooling
+#     bash test-all.sh --phase nvidia     # only the vendor NVIDIA stack
+#     bash test-all.sh --phase all        # default — every phase
+#
+#   The --phase flag exists so the multi-reboot install flow can verify just
+#   the slice the operator wants after a given reboot. The mapping mirrors
+#   the install phases in install-all.sh (see CLAUDE.md).
 #
 #   Exit code: 0 if every check passed, 1 if anything is MISSING or FAILED.
 # ============================================================================
@@ -26,13 +37,25 @@ LLAMA_PREFIX="${LLAMA_PREFIX:-$SCRATCH_ROOT/llama.cpp}"
 
 # CLI
 JSON_OUT=0
+PHASE="${PHASE:-all}"
 while (( $# > 0 )); do
     case "$1" in
         --json)            JSON_OUT=1; shift ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        --phase)           PHASE="$2"; shift 2 ;;
+        --phase=*)         PHASE="${1#*=}"; shift ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         *) printf 'unknown arg: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+case "$PHASE" in
+    all|nvidia|userland|apps|desktop|venvs|tuning) ;;
+    *) printf 'unknown --phase: %s (expected: all, nvidia, userland, apps, desktop, venvs, tuning)\n' "$PHASE" >&2; exit 2 ;;
+esac
+
+# phase_runs <name> — true if PHASE=all OR PHASE matches <name>.
+phase_runs() {
+    [[ "$PHASE" == "all" || "$PHASE" == "$1" ]]
+}
 
 # Result tracking
 RESULTS=()
@@ -173,8 +196,9 @@ check_port() {
 }
 
 # ============================================================================
-# 1) TOOLCHAIN
+# 1) TOOLCHAIN  (phase: userland)
 # ============================================================================
+if phase_runs userland; then
 step "Toolchain"
 check_cmd "gcc"               "--version" gcc
 check_cmd "g++"               "--version" g++
@@ -184,10 +208,12 @@ check_cmd "ninja"             "--version" ninja
 check_cmd "git"               "--version" git
 check_cmd "python${PYTHON_VER}" "--version" "python${PYTHON_VER}" python3
 check_cmd "pip"               "--version" pip3 pip
+fi
 
 # ============================================================================
-# 2) NVIDIA / CUDA (vendor-installed — verify presence, not install)
+# 2) NVIDIA / CUDA (vendor-installed — verify presence, not install)  (phase: nvidia)
 # ============================================================================
+if phase_runs nvidia; then
 step "NVIDIA / CUDA (vendor-installed)"
 
 check_cmd "nvidia-smi" ""          nvidia-smi
@@ -287,12 +313,30 @@ fi
 # NUMA tooling
 check_cmd "numactl" "--show" numactl
 check_cmd "nvtop"   "--version" nvtop
+fi   # phase: nvidia
 
-# Operational tuning artifacts from install-all.sh
+# ============================================================================
+# 2b) System tuning artifacts + ops helpers  (phase: tuning)
+# ============================================================================
+if phase_runs tuning; then
+step "System tuning + operational helpers"
 if [[ -f /etc/security/limits.d/99-llm-multigpu.conf ]]; then
     record "limits.d" PASS "/etc/security/limits.d/99-llm-multigpu.conf"
 else
     record "limits.d" MISSING "/etc/security/limits.d/99-llm-multigpu.conf"
+fi
+if [[ -f /etc/sysctl.d/99-llm-multigpu.conf ]]; then
+    record "sysctl.d" PASS "/etc/sysctl.d/99-llm-multigpu.conf"
+else
+    record "sysctl.d" MISSING "/etc/sysctl.d/99-llm-multigpu.conf"
+fi
+thp_state=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true)
+if [[ "$thp_state" == *"[madvise]"* ]]; then
+    record "THP = madvise" PASS "$thp_state"
+elif [[ -n "$thp_state" ]]; then
+    record "THP = madvise" FAIL "current: $thp_state — disable-thp-defrag.service did not apply"
+else
+    record "THP = madvise" MISSING "/sys/kernel/mm/transparent_hugepage/enabled unreadable"
 fi
 
 # Helper scripts
@@ -304,10 +348,12 @@ if systemctl cat llama-server@.service >/dev/null 2>&1; then
 else
     record "llama-server@.service" MISSING "systemd template not registered"
 fi
+fi   # phase: tuning
 
 # ============================================================================
-# 3) GUI LAUNCH CAPABILITY
+# 3) GUI LAUNCH CAPABILITY  (phase: apps)
 # ============================================================================
+if phase_runs apps; then
 step "GUI launch capability"
 
 if [[ -n "${DISPLAY:-}" ]]; then
@@ -337,52 +383,67 @@ for sb in /opt/google/chrome/chrome-sandbox /usr/share/code/chrome-sandbox; do
     fi
 done
 
+fi   # phase: apps  (closes section 3)
+
 # ============================================================================
-# 4) BROWSERS / GUI APPS
+# 4) BROWSERS / GUI APPS  (phase: apps)
 # ============================================================================
+if phase_runs apps; then
 step "Browsers & GUI apps"
 check_gui "VS Code"        code /usr/bin/code /usr/share/code/code
 check_gui "Google Chrome"  google-chrome-stable google-chrome /opt/google/chrome/google-chrome
 check_gui "Firefox"        firefox /opt/firefox/firefox /usr/local/bin/firefox
+fi   # phase: apps
 
 # ============================================================================
-# 5) DEV CLIs
+# 5) DEV CLIs  (phase: apps)
 # ============================================================================
+if phase_runs apps; then
 step "Developer CLIs"
 check_cmd "Node.js"  "--version" node /opt/nodejs/bin/node /usr/local/bin/node
 check_cmd "npm"      "--version" npm  /opt/nodejs/bin/npm  /usr/local/bin/npm
 check_cmd "Bun"      "--version" bun  /usr/local/bin/bun
 check_cmd "Opencode" "--version" opencode /usr/local/bin/opencode
+fi   # phase: apps
 
 # ============================================================================
-# 6) LLAMA.CPP
+# 6) LLAMA.CPP  (phase: venvs)
 # ============================================================================
+if phase_runs venvs; then
 step "llama.cpp"
 check_cmd "llama-cli"    "--version" "$LLAMA_PREFIX/build/bin/llama-cli" llama-cli
 check_cmd "llama-server" "--version" "$LLAMA_PREFIX/build/bin/llama-server" llama-server
+fi   # phase: venvs
 
 # ============================================================================
-# 7) PYTHON VENVS
+# 7) PYTHON VENVS  (phase: venvs)
 # ============================================================================
+if phase_runs venvs; then
 step "Python venvs"
-check_venv "inference" "$INFERENCE_PREFIX" \
-    'import sys, torch; print(f"py{sys.version_info.major}.{sys.version_info.minor} torch={torch.__version__} cuda={torch.cuda.is_available()} devices={torch.cuda.device_count() if torch.cuda.is_available() else 0}")'
+# Inference venv is now CPU-only (no torch, no vLLM); probe the RAG/FastAPI
+# stack instead.
+check_venv "inference (CPU-only RAG)" "$INFERENCE_PREFIX" \
+    'import sys, importlib
+mods = ("fastapi", "langchain", "sentence_transformers", "transformers", "tiktoken")
+out = []
+for m in mods:
+    try:
+        out.append(f"{m}={getattr(importlib.import_module(m), \"__version__\", \"?\")}")
+    except Exception as e:
+        out.append(f"{m}=IMPORT_FAIL({e.__class__.__name__})")
+print(f"py{sys.version_info.major}.{sys.version_info.minor} " + " ".join(out))'
 
 check_venv "training"  "$TRAINING_PREFIX" \
     'import torch, torch_geometric; print(f"torch={torch.__version__} pyg={torch_geometric.__version__} cuda={torch.cuda.is_available()}")'
 
 check_venv "jupyter"   "$JUPYTER_PREFIX" \
     'import jupyterlab, notebook; print(f"jupyterlab={jupyterlab.__version__} notebook={notebook.__version__}")'
-
-# Bonus: vLLM (inference venv)
-if [[ -x "$INFERENCE_PREFIX/venv/bin/python" ]]; then
-    check_venv "inference: vLLM" "$INFERENCE_PREFIX" \
-        'import vllm; print(f"vllm={vllm.__version__}")'
-fi
+fi   # phase: venvs
 
 # ============================================================================
-# 8) REMOTE DESKTOP (if installed)
+# 8) REMOTE DESKTOP (if installed)  (phase: desktop)
 # ============================================================================
+if phase_runs desktop; then
 step "Remote desktop"
 if dpkg-query -W -f='${db:Status-Abbrev}' xrdp 2>/dev/null | grep -q '^ii'; then
     check_dpkg "xrdp"
@@ -392,10 +453,12 @@ if dpkg-query -W -f='${db:Status-Abbrev}' xrdp 2>/dev/null | grep -q '^ii'; then
 else
     record "xrdp" SKIP "not installed (INSTALL_DESKTOP=0 during install)"
 fi
+fi   # phase: desktop
 
 # ============================================================================
-# 9) BROKEN DPKG STATE
+# 9) BROKEN DPKG STATE  (phase: tuning)
 # ============================================================================
+if phase_runs tuning; then
 step "Broken dpkg state"
 if command -v dpkg >/dev/null 2>&1; then
     broken=$(dpkg -l 2>/dev/null | awk '/^.[HUF]/ {print $2}')
@@ -406,10 +469,12 @@ if command -v dpkg >/dev/null 2>&1; then
         record "dpkg health" FAIL "$bcount broken: $(echo $broken | tr '\n' ' ' | cut -c1-120)"
     fi
 fi
+fi   # phase: tuning
 
 # ============================================================================
-# 10) /run/reboot-required (advisory)
+# 10) /run/reboot-required  (phase: tuning)
 # ============================================================================
+if phase_runs tuning; then
 step "Reboot state"
 if [[ -f /run/reboot-required ]]; then
     pkgs=$(tr '\n' ' ' </run/reboot-required.pkgs 2>/dev/null || echo "")
@@ -417,6 +482,7 @@ if [[ -f /run/reboot-required ]]; then
 else
     record "reboot pending" PASS "no pending reboot"
 fi
+fi   # phase: tuning
 
 # ============================================================================
 # SUMMARY
@@ -453,7 +519,7 @@ else
         printf '    2. apparmor unprivileged userns restricted — sysctl kernel.apparmor_restrict_unprivileged_userns=0\n'
         printf '    3. Missing shared libs — apt-get install the names ldd reports.\n'
         printf '  busBW < 1200 GB/s on 8x B300? Check nvidia-fabricmanager status + nvidia-smi nvlink --status\n'
-        printf '  vLLM import errors? Verify cu130 wheel: %s/venv/bin/pip show torch | grep -i cuda\n' "$INFERENCE_PREFIX"
+        printf '  Inference venv import errors? It is CPU-only now — verify with: %s/venv/bin/pip list | grep -iE "torch|vllm" (expect EMPTY)\n' "$INFERENCE_PREFIX"
         printf '  Broken dpkg? sudo apt-get -f install\n'
     fi
 fi
