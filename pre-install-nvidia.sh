@@ -223,13 +223,18 @@ if command -v lspci >/dev/null 2>&1; then
             # tensor split flags in 16-ops) is calibrated to N=8.
             red_fail N06 "GPU count == 8 (HGX/DGX B300)" "expected 8 for HGX/DGX B300, found $gpu_count"
         fi
-        # Blackwell device-id heuristic (B100/B200/B300 use a range of 2BXX/2DXX ids).
-        if printf '%s\n' "$gpu_lines" | grep -qiE '2[bd][0-9a-f]{2}'; then
-            green_info N07 "Blackwell device-id" "matched pattern (2BXX/2DXX)"
+        # Blackwell device-id heuristic. Current R580 modaliases include
+        # 29xx plus 2Bxx-2Fxx/31xx data-center IDs; the older 2B/2D-only
+        # check rejected the live B300 SXM6 AC target.
+        if printf '%s\n' "$gpu_lines" | grep -qiE '\[10de:(29[0-9a-f]{2}|2[bcdef][0-9a-f]{2}|31[0-9a-f]{2})\]'; then
+            green_info N07 "Blackwell device-id" "matched R580 Blackwell-class PCI ID"
+        elif command -v nvidia-smi >/dev/null 2>&1 \
+                && nvidia-smi -L 2>/dev/null | grep -qiE 'B300|B200|Blackwell'; then
+            green_info N07 "Blackwell device-id" "confirmed by nvidia-smi model name"
         else
             # Strict: if the GPUs aren't Blackwell, R580+sm_103 selections are
             # wrong end-to-end (driver branch, CUDA arch list, NCCL pin).
-            red_fail N07 "Blackwell device-id" "no 2BXX/2DXX device-id matched — these are NOT Blackwell GPUs; this bundle is for B300"
+            red_fail N07 "Blackwell device-id" "no known Blackwell PCI ID or nvidia-smi B300/B200 model matched — this bundle is for B300"
         fi
     else
         red_fail N05 "NVIDIA GPUs detected" "no 10de: devices found by lspci"
@@ -243,11 +248,20 @@ fi
 # ============================================================================
 _section "N4. NVSwitch fabric"
 
-# NVSwitch and NVLink controllers also show under 10de:; class 0680 (system
-# peripheral) or 0c0X.
-nvsw_count=$(lspci -d 10de: 2>/dev/null | grep -ciE 'NVSwitch|NVLink' || true)
-if (( nvsw_count > 0 )); then
-    green_info N08 "NVSwitch / NVLink devices" "$nvsw_count entry(ies) — fabric manager required"
+# NVSwitch/NVLink controllers are not always named as such by pci.ids on fresh
+# images. Prefer explicit names, then fall back to non-GPU NVIDIA PCI functions
+# as fabric candidates, then to a live nvidia-smi Fabric stanza if a driver is
+# already installed.
+nvidia_pci_all=$(lspci -d 10de: -nn 2>/dev/null || true)
+nvsw_named_count=$(printf '%s\n' "$nvidia_pci_all" | grep -ciE 'NVSwitch|NVLink' || true)
+nvsw_candidate_count=$(printf '%s\n' "$nvidia_pci_all" | grep -viE '3D controller|VGA compatible controller' | grep -c . || true)
+if (( nvsw_named_count > 0 )); then
+    green_info N08 "NVSwitch / NVLink devices" "$nvsw_named_count named entry(ies) — fabric manager required"
+elif (( nvsw_candidate_count > 0 )); then
+    green_info N08 "NVSwitch / NVLink devices" "$nvsw_candidate_count non-GPU NVIDIA PCI function(s) — pci.ids may not name NVSwitch yet"
+elif command -v nvidia-smi >/dev/null 2>&1 \
+        && nvidia-smi -q 2>/dev/null | grep -qE '^[[:space:]]+Fabric[[:space:]]*$|^[[:space:]]+Fabric[[:space:]]+State[[:space:]]*:'; then
+    green_info N08 "NVSwitch / NVLink devices" "Fabric stanza visible in nvidia-smi"
 else
     # Strict: HGX B300 must expose NVSwitch via lspci. Absence means either
     # the NVSwitch is firmware-broken or this is the wrong server SKU.

@@ -15,8 +15,9 @@
 #     - Userland apt packages (~25 + GUI runtime libs + xfce4/xrdp): build
 #       tools, htop/nvtop/tmux, network utils, python3.12-venv/dev, etc.
 #     - VS Code, Chrome, Firefox, Node.js LTS, Bun, Opencode
-#     - Python wheels: inference (CPU-only RAG/FastAPI), training (cu130 + PyG + Huni projects),
-#       jupyter (data science), llama.cpp utility scripts
+#     - Python wheels: inference (torch +cu130 + RAG/FastAPI),
+#       training (cu130 + PyG + Huni projects), jupyter (data science),
+#       llama.cpp utility scripts
 #     - llama.cpp source (built on target against the NVIDIA bundle's nvcc 13.0)
 #
 #   What this does NOT bundle (lives in the nvidia-airgap-bundle):
@@ -47,6 +48,19 @@
 #     to install a bare-metal bundle on a prepped server (and vice versa).
 # ============================================================================
 set -euo pipefail
+
+# ============================================================================
+# Transcript log — capture ALL stdout/stderr (pip, apt, curl, helpers) to a
+# single timestamped file so failures don't scroll off the screen and can be
+# grepped after the fact. Override with GATHER_LOG=/path/to/file.log.
+# The log lives in $HOME (not SCRIPT_DIR — SCRIPT_DIR is the git repo) and not
+# in $OUT_DIR (which gets `rm -rf`'d below).
+# ============================================================================
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+GATHER_LOG="${GATHER_LOG:-$HOME/gather-all-$RUN_STAMP.log}"
+mkdir -p "$(dirname "$GATHER_LOG")"
+exec > >(tee -a "$GATHER_LOG") 2>&1
+printf '\033[1;36m[gather]\033[0m transcript log: %s\n' "$GATHER_LOG"
 
 # ============================================================================
 # CONFIGURATION
@@ -86,9 +100,12 @@ NODE_LTS_MAJOR="${NODE_LTS_MAJOR:-22}"
 # Bun
 BUN_VER="${BUN_VER:-latest}"
 
-# vLLM is no longer bundled. The inference venv (step 11) is CPU-only.
-# Keeping this stub commented for archaeology — do NOT re-enable without
-# revisiting the multi-GPU NCCL ABI footgun (#15525, #20862, #28283).
+# vLLM intentionally NOT bundled. Both venvs now run torch +cu130, so the
+# old "CPU-only inference" rationale no longer applies — but vLLM's
+# torch/NCCL pinning has historically diverged from the training venv inside
+# the same install, recreating the in-process NCCL version-mismatch class
+# of bug (PyTorch #112285 / #122571). Bulk text-generation goes through
+# llama.cpp's HTTP server (step_14_llamacpp_build).
 # VLLM_VER="${VLLM_VER:-}"
 
 # llama.cpp source (built on target against vendor's nvcc)
@@ -312,6 +329,30 @@ log "Output directory: $OUT_DIR"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"/{debs,apps,src,wheels/inference,wheels/training,wheels/llamacpp,wheels/jupyter,requirements,meta}
 
+# Torch pin used as pip --constraint for EVERY wheelhouse download. Pinning
+# to the local-versioned form `torch==X.Y.Z+cu130` forces pip to pick the
+# cu130 wheel even when transitive deps (sentence-transformers,
+# torchsummaryX, pytorch-warmup, llama.cpp's convert_hf_to_gguf reqs that
+# bundle `--extra-index-url cpu`, etc.) would otherwise resolve torch from
+# PyPI default or the cpu index. Different torch *versions* across
+# wheelhouses are tolerable per project policy (e.g., llama.cpp may pin a
+# different X.Y), but the CUDA tag must always be +cu130 — never +cpu,
+# never untagged PyPI default.
+TORCH_CONSTRAINT="$OUT_DIR/.torch-pin.txt"
+# torchvision/torchaudio versions track the torch minor release on the cu130
+# index. As of cu130: torch 2.11.0 ↔ torchvision 0.26.0 / torchaudio 2.11.0;
+# torch 2.12.0 ↔ torchvision 0.27.0 / torchaudio 2.12.0. Pinning all three
+# prevents pip from downloading the +cu130 torchvision 0.27.0 alongside our
+# 0.26.0+cu130 just because `torchvision` was listed unpinned somewhere.
+TORCHVISION_VER="${TORCHVISION_VER:-0.26.0}"
+TORCHAUDIO_VER="${TORCHAUDIO_VER:-$TORCH_VER_TRAINING}"
+cat > "$TORCH_CONSTRAINT" <<EOF
+torch==${TORCH_VER_TRAINING}+${TORCH_CUDA_TAG}
+torchvision==${TORCHVISION_VER}+${TORCH_CUDA_TAG}
+torchaudio==${TORCHAUDIO_VER}+${TORCH_CUDA_TAG}
+EOF
+TORCH_PIN_ARGS=( --constraint "$TORCH_CONSTRAINT" --extra-index-url "$TORCH_INDEX" )
+
 cat > "$OUT_DIR/meta/target.env" <<EOF
 BUNDLE_VARIANT=prepped
 BUNDLE_OS_ID=$ID
@@ -321,7 +362,7 @@ BUNDLE_ARCH=$(dpkg --print-architecture)
 BUNDLE_PYTHON=$PYTHON_VER
 BUNDLE_TORCH_TRAINING=$TORCH_VER_TRAINING
 BUNDLE_TORCH_CUDA=$TORCH_CUDA_TAG
-BUNDLE_INFERENCE_VENV=cpu-only-rag
+BUNDLE_INFERENCE_VENV=rag-fastapi-gpu-torch
 BUNDLE_NODE_LTS_MAJOR=$NODE_LTS_MAJOR
 BUNDLE_INSTALL_DESKTOP=$INSTALL_DESKTOP
 BUNDLE_INCLUDE_JUPYTER=$INCLUDE_JUPYTER
@@ -364,21 +405,20 @@ APT_PKGS=(
     libhdf5-dev               # h5py native build
     libssl-dev
     libffi-dev
-    libcurl4-openssl-dev      # llama-server LLAMA_CURL=ON
+    libcurl4-openssl-dev      # transitive convenience; LLAMA_CURL=ON is deprecated (#18922) — llama.cpp now built with LLAMA_OPENSSL=ON
 
     # Editors
     gedit
     vim
     nano
 
-    # gedit pulls libenchant-2-2 (spell-check). libenchant-2-2's deps are
-    # listed as alternatives (hunspell-en-us | hunspell-dictionary | ...),
-    # and apt-rdepends does not always follow alternatives — without these
-    # explicit entries the airgap repo is missing them and `apt install gedit`
-    # fails with "you have held broken packages" on the target box.
-    hunspell-en-us
-    libhunspell-1.7-0
-    libaspell15
+    # NOTE: gedit pulls libenchant-2-2 for spell-check. On Ubuntu 24.04 noble,
+    # libenchant-2-2's hunspell dep is a Recommends, NOT a Depends. step_06
+    # uses --no-install-recommends, so gedit installs cleanly without any
+    # dictionary (spell-check just shows no suggestions; fine on a server).
+    # We previously listed hunspell-en-us / libhunspell-1.7-0 / libaspell15
+    # here, then pruned the .debs below — the contradiction made step_04's
+    # apt dry-run die on "Unable to locate package hunspell-en-us". Removed.
 
     # Monitoring
     htop
@@ -525,6 +565,65 @@ unset _normalized_apt_pkgs
 
 printf '%s\n' "${APT_PKGS[@]}" > "$OUT_DIR/meta/apt-packages.txt"
 
+# Userland bundles must not carry base OS packages. The target already has a
+# known-good libc/systemd/kernel baseline after install-nvidia.sh. Letting this
+# bundle upgrade that baseline is the reboot/login brick path we are avoiding.
+BASE_OS_PRUNE_EXACT=(
+    libc6 libc6-dev libc-bin libc-dev-bin locales
+    systemd systemd-sysv systemd-resolved systemd-timesyncd systemd-oomd
+    libsystemd0 libsystemd-shared libnss-systemd libpam-systemd
+    udev libudev1
+    dbus dbus-daemon dbus-user-session
+    linux-firmware microcode intel-microcode amd64-microcode
+)
+_is_base_os_pkg() {
+    local pkg="$1" p
+    for p in "${BASE_OS_PRUNE_EXACT[@]}"; do
+        [[ "$pkg" == "$p" ]] && return 0
+    done
+    case "$pkg" in
+        linux-image-*|linux-headers-*|linux-modules-*|linux-modules-extra-*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# Userland bundles must NOT ship any of the NVIDIA stack — install-nvidia.sh
+# owns the driver/CUDA toolkit/FabricManager/NVLSM/NCCL/DCGM via the separate
+# nvidia-airgap bundle and `apt-mark hold`s every one of them. A userland deb
+# matching these patterns would either shadow the held package (causing
+# multi-GPU CUDA/NCCL ABI skew at process start) or get apt-rejected at
+# install time because the hold refuses the upgrade.
+#
+# apt-rdepends follows Depends only by default (not Suggests/Recommends), so
+# the *front-line* protection is that nothing in APT_PKGS hard-depends on a
+# CUDA/NVIDIA lib. This function is defense-in-depth: it filters anything
+# matching at the closure-walker stage (so we don't waste bandwidth) and is
+# re-checked post-prune below so a regression in APT_PKGS surfaces as a
+# `die`, not a silent leak.
+_is_nvidia_pkg() {
+    local pkg="$1"
+    case "$pkg" in
+        # Driver + runtime
+        nvidia-*|libnvidia-*|libcuda1|libcuda1-*)
+            return 0 ;;
+        # CUDA toolkit family (handled by install-nvidia.sh's minimal set)
+        cuda-*|libcudart*|libcublas*|libcudnn*|libcusparse*|libcurand*|libcufft*|libcusolver*|libnpp*|libnvjitlink*|libnvjpeg*|libnvrtc*|libnvtoolsext*|libcccl*)
+            return 0 ;;
+        # FabricManager / NVLSM / DCGM
+        nvlsm*|datacenter-gpu-manager*|libnvidia-nscq*|nv-fabric*)
+            return 0 ;;
+        # NCCL (gather-nvidia.sh ships this conditionally on SKIP_NCCL=0)
+        libnccl*)
+            return 0 ;;
+        # TensorRT — unlikely to be pulled by userland deps but kept for safety
+        libnvinfer*|libnvonnxparsers*|libnvparsers*)
+            return 0 ;;
+    esac
+    return 1
+}
+
 log "Refreshing apt indexes"
 _apt_get_wait update \
     -o Acquire::http::Timeout=60 \
@@ -582,10 +681,28 @@ apt-rdepends "${APT_PKGS[@]}" 2>/dev/null \
 : > "$OUT_DIR/meta/apt-closure-virtual.txt"
 : > "$OUT_DIR/meta/apt-closure-unresolved.txt"
 : > "$OUT_DIR/meta/apt-closure-download-failed.txt"
+: > "$OUT_DIR/meta/apt-closure-baseos-skipped.txt"
+: > "$OUT_DIR/meta/apt-closure-nvidia-skipped.txt"
 
 while IFS= read -r pkg; do
     [[ -n "$pkg" ]] || continue
+    if _is_base_os_pkg "$pkg"; then
+        printf '%s\n' "$pkg" >> "$OUT_DIR/meta/apt-closure-baseos-skipped.txt"
+        continue
+    fi
+    if _is_nvidia_pkg "$pkg"; then
+        printf '%s\n' "$pkg" >> "$OUT_DIR/meta/apt-closure-nvidia-skipped.txt"
+        continue
+    fi
     if resolved=$(_apt_resolve_download_name "$pkg"); then
+        if _is_base_os_pkg "$resolved"; then
+            printf '%s -> %s\n' "$pkg" "$resolved" >> "$OUT_DIR/meta/apt-closure-baseos-skipped.txt"
+            continue
+        fi
+        if _is_nvidia_pkg "$resolved"; then
+            printf '%s -> %s\n' "$pkg" "$resolved" >> "$OUT_DIR/meta/apt-closure-nvidia-skipped.txt"
+            continue
+        fi
         printf '%s\n' "$resolved" >> "$OUT_DIR/meta/apt-closure-download.txt"
         [[ "$resolved" != "$pkg" ]] && \
             printf '%s -> %s\n' "$pkg" "$resolved" >> "$OUT_DIR/meta/apt-closure-virtual.txt"
@@ -693,13 +810,22 @@ _prune_globs=(
     "libaspell*_*.deb" "libhunspell*_*.deb"
     # plymouth-label needs fonts-ubuntu which we don't bundle
     "plymouth-label_*.deb"
-    # Any cuda-* / nvidia-* / libnvidia-* that snuck in ??we DO NOT touch the
-    # vendor's NVIDIA stack from this bundle.
+    # NVIDIA/CUDA stack belongs to the nvidia-airgap bundle. The closure
+    # walker above already filters via _is_nvidia_pkg, so these globs are
+    # belt-and-suspenders for anything that slipped through resolution (e.g.,
+    # a virtual provider that resolved to a CUDA-named .deb post-download).
+    # The post-scan after this loop dies if anything still matches.
     "cuda-*.deb"
     "nvidia-*.deb"
     "libnvidia-*.deb"
+    "libcuda1_*.deb" "libcuda1-*.deb"
     "libcudart*.deb" "libcublas*.deb" "libcudnn*.deb" "libcusparse*.deb"
     "libcurand*.deb" "libcufft*.deb" "libcusolver*.deb" "libnpp*.deb"
+    "libnvjitlink*.deb" "libnvjpeg*.deb" "libnvrtc*.deb" "libnvtoolsext*.deb"
+    "libcccl*.deb"
+    "libnccl*.deb"
+    "nvlsm*.deb" "datacenter-gpu-manager*.deb" "nv-fabric*.deb"
+    "libnvinfer*.deb" "libnvonnxparsers*.deb" "libnvparsers*.deb"
 )
 shopt -s nullglob
 for pat in "${_prune_globs[@]}"; do
@@ -711,6 +837,19 @@ for pat in "${_prune_globs[@]}"; do
 done
 
 # ?? Dedupe: keep newest version of each package ?????????????????????????????
+BASE_OS_PRUNED_LIST="$OUT_DIR/meta/base-os-pruned-debs.txt"
+: > "$BASE_OS_PRUNED_LIST"
+for f in "$OUT_DIR"/debs/*.deb; do
+    [[ -e "$f" ]] || continue
+    pkg=$(dpkg-deb -f "$f" Package 2>/dev/null || true)
+    [[ -n "$pkg" ]] || continue
+    if _is_base_os_pkg "$pkg"; then
+        printf '%s\t%s\n' "$pkg" "$(basename "$f")" >> "$BASE_OS_PRUNED_LIST"
+        log "Pruning base-OS deb from userland bundle: $(basename "$f")"
+        rm -f "$f"
+    fi
+done
+
 declare -A _newest_ver _newest_path
 for f in "$OUT_DIR"/debs/*.deb; do
     base=$(basename "$f")
@@ -738,6 +877,46 @@ bundle_debs=( "$OUT_DIR"/debs/*.deb )
 log "Generating local apt repository metadata"
 ( cd "$OUT_DIR/debs" && dpkg-scanpackages . /dev/null > Packages )
 gzip -9c "$OUT_DIR/debs/Packages" > "$OUT_DIR/debs/Packages.gz"
+
+awk '
+    /^Package: / { pkg=$2; next }
+    /^Version: / && pkg != "" {
+        if (pkg ~ /^(libc6|libc6-dev|libc-bin|libc-dev-bin|locales|systemd|systemd-sysv|systemd-resolved|systemd-timesyncd|systemd-oomd|libsystemd0|libsystemd-shared|libnss-systemd|libpam-systemd|udev|libudev1|dbus|dbus-daemon|dbus-user-session|linux-firmware|microcode|intel-microcode|amd64-microcode)$/ ||
+            pkg ~ /^(linux-image-|linux-headers-|linux-modules-|linux-modules-extra-)/) {
+            print pkg " " $2
+        }
+        pkg=""
+    }
+' "$OUT_DIR/debs/Packages" > "$OUT_DIR/meta/base-os-leftovers.txt"
+if [[ -s "$OUT_DIR/meta/base-os-leftovers.txt" ]]; then
+    warn "Base-OS packages remain in debs/Packages:"
+    sed 's/^/  /' "$OUT_DIR/meta/base-os-leftovers.txt" >&2
+    die "Refusing to package a userland bundle that can upgrade libc/systemd/dbus/kernel/firmware."
+fi
+
+# Symmetric strict scan for NVIDIA/CUDA leakage. The closure walker filter
+# (_is_nvidia_pkg above) plus the prune-globs above should make this impossible,
+# but if a regression slips a CUDA-named deb through, refuse to package — better
+# to fail here than to silently ship a deb that shadows install-nvidia.sh's
+# held set on the target.
+awk '
+    /^Package: / { pkg=$2; next }
+    /^Version: / && pkg != "" {
+        if (pkg ~ /^(nvidia-|libnvidia-|cuda-|libcudart|libcublas|libcudnn|libcusparse|libcurand|libcufft|libcusolver|libnpp|libnvjitlink|libnvjpeg|libnvrtc|libnvtoolsext|libcccl|libnccl|libnvinfer|libnvonnxparsers|libnvparsers|nvlsm|datacenter-gpu-manager|nv-fabric)/ ||
+            pkg == "libcuda1" || pkg ~ /^libcuda1-/) {
+            print pkg " " $2
+        }
+        pkg=""
+    }
+' "$OUT_DIR/debs/Packages" > "$OUT_DIR/meta/nvidia-leftovers.txt"
+if [[ -s "$OUT_DIR/meta/nvidia-leftovers.txt" ]]; then
+    warn "NVIDIA/CUDA packages remain in debs/Packages — userland bundle MUST NOT ship the nvidia stack:"
+    sed 's/^/  /' "$OUT_DIR/meta/nvidia-leftovers.txt" >&2
+    warn "Front-line fix: identify the userland APT_PKGS entry that pulled these and remove it."
+    warn "If you genuinely need a CUDA-linked deb on the target, install via gather-nvidia.sh's bundle instead."
+    die "Refusing to package a userland bundle that can shadow install-nvidia.sh's held CUDA/driver stack."
+fi
+
 log "APT: $(ls "$OUT_DIR/debs" | wc -l) debs ($(du -sh "$OUT_DIR/debs" | cut -f1))"
 
 # ============================================================================
@@ -859,15 +1038,19 @@ echo "$BUN_TAG" > "$OUT_DIR/apps/bun.version"
 log "Bun: $(du -sh "$OUT_DIR/apps/bun-linux-x64.zip" | cut -f1)"
 
 # ============================================================================
-# 6) PYTHON WHEELS — Inference (CPU-only RAG/FastAPI/langchain)
+# 6) PYTHON WHEELS — Inference (GPU torch cu130 + RAG/FastAPI/langchain)
 #
-# Historically this wheelhouse shipped torch (cu130) + vLLM. Both have been
-# removed: their presence alongside the training venv caused multi-GPU NCCL
-# ABI skew (#15525, #20862, #28283). The inference venv (step 11) is now a
-# pure CPU stack — request routing + RAG + embedding loading — that talks to
-# llama.cpp's HTTP server (built in step 14) for GPU inference.
+# Both venvs pin torch to the SAME +cu130 version. The earlier "CPU-only"
+# design cited NCCL ABI skew between venvs as rationale, but separate venvs
+# run as separate processes and each dlopen their own libnccl.so.2 — no
+# conflict. Real NCCL conflicts (#112285, #122571) are within a SINGLE
+# environment when two packages pull different nvidia-nccl-cu* versions.
+# vLLM is still excluded — its torch/NCCL pinning is too aggressive and has
+# repeatedly diverged from the training venv. Inference uses
+# sentence-transformers/transformers directly (GPU-capable via cu130 torch)
+# and routes generation traffic to llama.cpp's HTTP server (step 14).
 # ============================================================================
-step "Python wheels: Inference (CPU-only RAG/FastAPI; no torch, no vLLM)"
+step "Python wheels: Inference (torch ${TORCH_VER_TRAINING}+${TORCH_CUDA_TAG} + RAG/FastAPI)"
 
 VENV_INF="$(mktemp -d)/venv"
 "$PYTHON_BIN" -m venv "$VENV_INF"
@@ -876,27 +1059,53 @@ source "$VENV_INF/bin/activate"
 pip install --upgrade pip wheel setuptools
 pip download --dest "$OUT_DIR/wheels/inference" pip wheel setuptools
 
-# Strip torch/torchvision/torchaudio AND vllm from any pre-existing project
-# requirements files — those wheels intentionally do not live in this
-# wheelhouse anymore. Also drop Windows-only / deprecated / dev-host
-# packages and sdists that need a CUDA toolchain at install time.
-_INF_REQ_EXCLUDE_RE='^\s*#|^\s*$|^torch$|^torchvision$|^torchaudio$|^vllm$|^vllm[\[<>=]|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs'
+# Pre-download torch from the cu130 index BEFORE any transitive resolver runs.
+# Without this, sentence-transformers/transformers resolve torch from PyPI's
+# default (currently 2.12.0 cu130, but mismatched with the training venv's
+# 2.11.0+cu130 — and PyG cu130 extensions only exist for 2.11.0). Pinning here
+# keeps both venvs ABI-aligned so model files and bundled NCCL match.
+log "Downloading torch==${TORCH_VER_TRAINING}+${TORCH_CUDA_TAG} + torchvision + torchaudio (inference)"
+pip download --dest "$OUT_DIR/wheels/inference" --index-url "$TORCH_INDEX" \
+    "torch==${TORCH_VER_TRAINING}" torchvision torchaudio \
+    || die "Failed to download torch==${TORCH_VER_TRAINING} from $TORCH_INDEX (inference wheelhouse)"
+
+# Strip torch family + vllm from project requirements files — torch is
+# already pinned above with the correct +cu130 tag; letting the resolver
+# pull `torch>=X.Y` from PyPI would shadow that with a different version
+# and silently break PyG ABI on the training side via shared wheelhouse logic.
+# Also drop Windows-only / deprecated / dev-host packages and sdists that
+# need a CUDA toolchain at install time.
+_INF_REQ_EXCLUDE_RE='^\s*#|^\s*$|^\s*(torch|torchvision|torchaudio|torch[-_][a-z_-]+|pyg[-_]lib|vllm)([<>=!~ ;\[]|$)|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs'
+
+# Copy with CRLF→LF normalization. Huni projects are edited on Windows and
+# their requirements.txt often ship with `\r\n` line terminators. Without
+# normalizing, the regex below ($_INF_REQ_EXCLUDE_RE) fails to strip lines
+# like `torch\r\n` because the package name is followed by a literal `\r`
+# (not by the version-op / space / `$` the regex expects), so torch slips
+# through and PyPI's default torch 2.12.0 gets pulled into the wheelhouse,
+# shadowing the +cu130 pin we set above.
+_copy_req_normalized() { sed 's/\r$//' "$1" > "$2"; }
 
 if [[ -n "$LLMAPI_REQ" && -f "$LLMAPI_REQ" ]]; then
-    cp "$LLMAPI_REQ" "$OUT_DIR/requirements/llm_api.txt"
+    _copy_req_normalized "$LLMAPI_REQ" "$OUT_DIR/requirements/llm_api.txt"
     grep -vE "$_INF_REQ_EXCLUDE_RE" "$OUT_DIR/requirements/llm_api.txt" \
-        | pip download --dest "$OUT_DIR/wheels/inference" -r /dev/stdin \
+        | pip download --dest "$OUT_DIR/wheels/inference" \
+            "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/inference" \
+            -r /dev/stdin \
         || warn "Some LLM_API_fast packages failed."
 fi
 if [[ -n "$LLMAPI_FULL_REQ" && -f "$LLMAPI_FULL_REQ" ]]; then
-    cp "$LLMAPI_FULL_REQ" "$OUT_DIR/requirements/llm_api_full.txt"
+    _copy_req_normalized "$LLMAPI_FULL_REQ" "$OUT_DIR/requirements/llm_api_full.txt"
     grep -vE "$_INF_REQ_EXCLUDE_RE" "$OUT_DIR/requirements/llm_api_full.txt" \
-        | pip download --dest "$OUT_DIR/wheels/inference" -r /dev/stdin \
+        | pip download --dest "$OUT_DIR/wheels/inference" \
+            "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/inference" \
+            -r /dev/stdin \
         || warn "Some LLM_API_full packages failed."
 fi
 
-log "Downloading core inference / RAG wheels (CPU-only)"
+log "Downloading core inference / RAG wheels"
 pip download --dest "$OUT_DIR/wheels/inference" \
+    "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/inference" \
     sentence-transformers faiss-cpu rank-bm25 \
     transformers tokenizers safetensors huggingface-hub tiktoken \
     langchain langchain-core langchain-community langchain-ollama \
@@ -935,28 +1144,33 @@ pip download --dest "$OUT_DIR/wheels/training" --index-url "$TORCH_INDEX" \
     || die "Failed to download torch==${TORCH_VER_TRAINING} from $TORCH_INDEX"
 
 log "Downloading torch-geometric"
-pip download --dest "$OUT_DIR/wheels/training" torch-geometric
+pip download --dest "$OUT_DIR/wheels/training" \
+    "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/training" \
+    torch-geometric
 
 log "Downloading PyG extensions (pyg_lib, scatter, sparse, cluster)"
 # Note: torch_spline_conv is NOT published on PyG cu130 index. If MeshGraphNets
 # uses SplineConv, fall back to CPU op at runtime or build from source on target.
 pip download --dest "$OUT_DIR/wheels/training" \
+    "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/training" \
     --find-links "$PYG_INDEX" \
     pyg_lib torch-scatter torch-sparse torch-cluster \
     || warn "PyG extensions partial ??check $PYG_INDEX"
 
 # Try torch_spline_conv but don't fail if missing
 pip download --dest "$OUT_DIR/wheels/training" \
+    "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/training" \
     --find-links "$PYG_INDEX" \
     torch-spline-conv 2>/dev/null \
     || warn "torch_spline_conv not in cu130 index ??install-time fallback if needed."
 
-# Project requirements (per-Huni-project)
-[[ -n "$MGN_REQ"              && -f "$MGN_REQ"              ]] && cp "$MGN_REQ"              "$OUT_DIR/requirements/meshgraphnets.txt"
-[[ -n "$SIMULGEN_REQ"         && -f "$SIMULGEN_REQ"         ]] && cp "$SIMULGEN_REQ"         "$OUT_DIR/requirements/simulgen.txt"
-[[ -n "$PEMTRON_REQ"          && -f "$PEMTRON_REQ"          ]] && cp "$PEMTRON_REQ"          "$OUT_DIR/requirements/pemtron.txt"
-[[ -n "$PEMTRON_TRANSFER_REQ" && -f "$PEMTRON_TRANSFER_REQ" ]] && cp "$PEMTRON_TRANSFER_REQ" "$OUT_DIR/requirements/pemtron_transfer.txt"
-[[ -n "$ALL_PROJECTS_REQ"     && -f "$ALL_PROJECTS_REQ"     ]] && cp "$ALL_PROJECTS_REQ"     "$OUT_DIR/requirements/all_projects.txt"
+# Project requirements (per-Huni-project). Normalize CRLF→LF on copy — see
+# _copy_req_normalized in the inference section for why this matters.
+[[ -n "$MGN_REQ"              && -f "$MGN_REQ"              ]] && _copy_req_normalized "$MGN_REQ"              "$OUT_DIR/requirements/meshgraphnets.txt"
+[[ -n "$SIMULGEN_REQ"         && -f "$SIMULGEN_REQ"         ]] && _copy_req_normalized "$SIMULGEN_REQ"         "$OUT_DIR/requirements/simulgen.txt"
+[[ -n "$PEMTRON_REQ"          && -f "$PEMTRON_REQ"          ]] && _copy_req_normalized "$PEMTRON_REQ"          "$OUT_DIR/requirements/pemtron.txt"
+[[ -n "$PEMTRON_TRANSFER_REQ" && -f "$PEMTRON_TRANSFER_REQ" ]] && _copy_req_normalized "$PEMTRON_TRANSFER_REQ" "$OUT_DIR/requirements/pemtron_transfer.txt"
+[[ -n "$ALL_PROJECTS_REQ"     && -f "$ALL_PROJECTS_REQ"     ]] && _copy_req_normalized "$ALL_PROJECTS_REQ"     "$OUT_DIR/requirements/all_projects.txt"
 
 for rf in \
     "$OUT_DIR/requirements/meshgraphnets.txt" \
@@ -965,16 +1179,24 @@ for rf in \
     "$OUT_DIR/requirements/pemtron_transfer.txt"; do
     [[ -f "$rf" ]] || continue
     log "  Downloading from $(basename "$rf")"
-    # Drop torch/torchvision/torchaudio (already downloaded) + Windows-only or
-    # unavailable packages (pyreadline3, langchain-classic, xlwt, aider-chat,
-    # pyinstaller, llama-cpp-python builds against CUDA on target).
-    grep -vE '^\s*#|^\s*$|^torch$|^torchvision$|^torchaudio$|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs' "$rf" \
-        | pip download --dest "$OUT_DIR/wheels/training" -r /dev/stdin \
+    # Drop torch family (already downloaded with correct +cu130 tag; letting
+    # `torch>=X.Y` resolve from PyPI pulls a different torch and breaks PyG
+    # ABI — PyG extensions are tagged +pt211cu130 and only work against torch
+    # 2.11.x). Same for torch-cluster / torch-scatter / torch-sparse /
+    # torch-geometric / torch-spline-conv / pyg-lib — re-resolving them
+    # from PyPI tries to build sdists that need torch installed at build
+    # time (which the gather venv intentionally doesn't have). Also drop
+    # Windows-only / dev-host packages.
+    grep -vE '^\s*#|^\s*$|^\s*(torch|torchvision|torchaudio|torch[-_][a-z_-]+|pyg[-_]lib)([<>=!~ ;\[]|$)|pyreadline3|langchain-classic|xlwt|aider-chat|pyinstaller|llama-cpp-python|pip-system-certs' "$rf" \
+        | pip download --dest "$OUT_DIR/wheels/training" \
+            "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/training" \
+            -r /dev/stdin \
         || warn "Some packages from $(basename "$rf") failed."
 done
 
 log "Downloading core training/scientific wheels"
 pip download --dest "$OUT_DIR/wheels/training" \
+    "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/training" \
     numpy scipy h5py pandas tqdm matplotlib seaborn Pillow \
     scikit-learn scikit-image statsmodels networkx sympy \
     torchinfo tensorboard pytorch-warmup \
@@ -1029,7 +1251,16 @@ if (( ${#LLAMA_REQ_FILES[@]} > 0 )); then
     pip install --upgrade pip wheel setuptools
     pip download --dest "$OUT_DIR/wheels/llamacpp" pip wheel setuptools
     for rf in "${LLAMA_REQ_FILES[@]}"; do
-        pip download --dest "$OUT_DIR/wheels/llamacpp" -r "$rf" \
+        # Apply the torch +cu130 pin. llama.cpp's requirements-convert_hf_to_gguf.txt
+        # carries `--extra-index-url https://download.pytorch.org/whl/cpu`,
+        # which without the constraint causes pip to download torch-2.11.0+cpu —
+        # violating the project rule that all torch wheels must be +cu130.
+        # The constraint `torch==X.Y.Z+cu130` is a local-version pin that the
+        # cpu index cannot satisfy, forcing pip to fall back to our
+        # --extra-index-url cu130 instead.
+        pip download --dest "$OUT_DIR/wheels/llamacpp" \
+            "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/llamacpp" \
+            -r "$rf" \
             || warn "pip download failed for ${rf##*/}."
     done
     mkdir -p "$OUT_DIR/meta/requirements/llamacpp"
@@ -1055,7 +1286,11 @@ if [[ "$INCLUDE_JUPYTER" == "1" ]]; then
     pip download --dest "$OUT_DIR/wheels/jupyter" pip wheel setuptools
 
     log "Downloading JupyterLab + data science wheels"
+    # Apply the torch pin defensively. None of these packages currently pull
+    # torch transitively, but if a future jupyter widget or dep does, the
+    # constraint will force +cu130 to match the other wheelhouses.
     pip download --dest "$OUT_DIR/wheels/jupyter" \
+        "${TORCH_PIN_ARGS[@]}" --find-links "$OUT_DIR/wheels/jupyter" \
         jupyterlab notebook ipykernel ipywidgets \
         jupyter-server jupyter-collaboration \
         pandas polars numpy scipy \
@@ -1138,6 +1373,7 @@ printf '  Pre-flight: %s\n' "$BUNDLE_PARENT/pre-install-check.sh"
 printf '  Installer : %s\n' "$BUNDLE_PARENT/install-all.sh"
 printf '  Verifier  : %s\n' "$BUNDLE_PARENT/test-all.sh"
 printf '  Staging   : %s\n' "$OUT_DIR"
+printf '  Transcript: %s\n' "$GATHER_LOG"
 printf '\n'
 printf 'Transfer to airgapped server (FTP/scp one file at a time):\n'
 printf '  %s\n' "$BUNDLE_BIN"
@@ -1146,7 +1382,7 @@ printf '  %s\n' "$BUNDLE_PARENT/install-all.sh"
 printf '  %s\n' "$BUNDLE_PARENT/install-all-steps.sh"
 printf '  %s\n' "$BUNDLE_PARENT/pre-install-check.sh"
 printf '  %s\n' "$BUNDLE_PARENT/test-all.sh"
-printf '\n  (5 small scripts + 1 .bin + 1 .sha256 — no install-all.d/ dir to ship.)\n\n'
+printf '\n  (4 small scripts + 1 .bin + 1 .sha256 — no install-all.d/ dir to ship.)\n\n'
 printf 'On the target:\n'
 printf '  sudo bash pre-install-check.sh   # readiness gate\n'
 printf '  sudo bash install-all.sh         # auto-extracts the bundle, runs step_01..step_17\n'

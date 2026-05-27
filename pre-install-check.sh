@@ -370,19 +370,14 @@ else
     red_fail R14 "nvidia-fabricmanager.service" "unit not registered — install-nvidia.sh did not install nvidia-fabricmanager-580?"
 fi
 
-# R15 nvidia-nvlsm.service active (B300 NVSwitch requirement)
-if systemctl list-unit-files nvidia-nvlsm.service >/dev/null 2>&1; then
-    nvlsm_state=$(systemctl is-active nvidia-nvlsm 2>/dev/null || echo unknown)
-    if [[ "$nvlsm_state" == "active" ]]; then
-        red_pass R15 "nvidia-nvlsm.service" "active"
-    else
-        red_fail R15 "nvidia-nvlsm.service" "$nvlsm_state — required for B300 NVSwitch"
-    fi
+# R15 NVLSM process active. Fabric Manager owns NVLSM on current R580/NVL5+.
+if pgrep -x nvlsm >/dev/null 2>&1; then
+    red_pass R15 "nvlsm process" "running"
 else
     # install-nvidia.sh: the nvidia-fabricmanager unit spawns the NVLSM daemon
     # as a child process — no separate nvidia-nvlsm.service unit by default.
     yel_warn Y19 "nvidia-nvlsm.service" "unit not registered (folded into nvidia-fabricmanager — verify nvlsm pid in test-nvidia.sh)"
-    red_pass R15 "nvidia-nvlsm.service" "not separately registered; covered by FabricManager"
+    red_fail R15 "nvlsm process" "not running; Fabric Manager did not start NVLSM"
 fi
 
 # R16 Fabric State = Completed for all GPUs
@@ -605,10 +600,10 @@ fi
 # is the canonical brick path on B300 (peermem ABI break, FM "system not
 # initialized", unbootable kernel without nvidia.ko).
 #
-# Mirrors the runtime check in install-all.d/04-apt-plan.sh, but surfaces
+# Mirrors the runtime check in install-all-steps.sh's step_04_apt_plan, but surfaces
 # the failure HERE so the operator sees it before install-all.sh even runs.
-BASE_OS_DANGER='libc6 libc6-dev systemd systemd-sysv dbus dbus-daemon linux-firmware microcode intel-microcode amd64-microcode'
-KERNEL_GLOB_PREFIXES='linux-image- linux-headers-'
+BASE_OS_DANGER='libc6 libc6-dev libc-bin libc-dev-bin locales systemd systemd-sysv systemd-resolved systemd-timesyncd systemd-oomd libsystemd0 libsystemd-shared libnss-systemd libpam-systemd udev libudev1 dbus dbus-daemon dbus-user-session linux-firmware microcode intel-microcode amd64-microcode'
+KERNEL_GLOB_PREFIXES='linux-image- linux-headers- linux-modules- linux-modules-extra-'
 
 # Read debs/Packages from either the extracted dir or the .bin tarball.
 PKG_INDEX_CONTENT=""

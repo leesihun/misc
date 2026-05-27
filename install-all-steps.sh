@@ -74,9 +74,39 @@ INSTALL_INFERENCE="${INSTALL_INFERENCE:-1}"
 INSTALL_TRAINING="${INSTALL_TRAINING:-1}"
 INSTALL_JUPYTER="${INSTALL_JUPYTER:-1}"
 INSTALL_LLAMA="${INSTALL_LLAMA:-1}"
-INSTALL_DESKTOP="${INSTALL_DESKTOP:-1}"
-# INSTALL_VLLM is intentionally NOT exposed. The inference venv is a CPU-only
-# RAG/FastAPI/langchain stack — no torch, no vLLM. See step_11_venv_inference.
+
+# INSTALL_DESKTOP: operator env > bundle's BUNDLE_INSTALL_DESKTOP > 1.
+# Resolve in the parent shell when this library is sourced so every step
+# subshell inherits the same value — otherwise a bundle gathered with
+# INSTALL_DESKTOP=0 would still trigger step_06's xfce4/xrdp apt install
+# (which warn-skips when debs are absent, but the noise is confusing).
+# The peek path reads meta/target.env without extracting the bundle.
+if [[ -z "${INSTALL_DESKTOP:-}" ]]; then
+    _bundle_desktop=""
+    if [[ -f "$BUNDLE_DIR/meta/target.env" ]]; then
+        _bundle_desktop=$(grep -E '^BUNDLE_INSTALL_DESKTOP=' \
+            "$BUNDLE_DIR/meta/target.env" 2>/dev/null | head -1 | cut -d= -f2)
+    fi
+    if [[ -z "$_bundle_desktop" ]]; then
+        shopt -s nullglob
+        _peek_bins=( "$REPO_ROOT"/all-airgap-bundle-ubuntu*.bin )
+        shopt -u nullglob
+        if (( ${#_peek_bins[@]} > 0 )) && [[ -f "${_peek_bins[0]}" ]]; then
+            _bundle_desktop=$(tar -xzOf "${_peek_bins[0]}" --wildcards \
+                '*meta/target.env' 2>/dev/null \
+                | grep -E '^BUNDLE_INSTALL_DESKTOP=' | head -1 | cut -d= -f2)
+        fi
+        unset _peek_bins
+    fi
+    INSTALL_DESKTOP="${_bundle_desktop:-1}"
+    unset _bundle_desktop
+fi
+export INSTALL_DESKTOP
+# INSTALL_VLLM is intentionally NOT exposed. The inference venv runs on the
+# SAME torch +cu130 as the training venv (separate venvs / separate processes
+# don't NCCL-conflict — see CLAUDE.md). vLLM stays excluded because its
+# torch/NCCL pinning historically diverges from the training venv inside the
+# same install. See step_11_venv_inference.
 
 # B300 = sm_103 (Blackwell Ultra). 100 covers B200 in mixed fleets.
 # Use -real to strip PTX — host is fixed-hardware (B200/B300 only).
@@ -182,6 +212,12 @@ checkpoint_reboot() {
         log "SKIP_CHECKPOINTS=1 — bypassing reboot break ($reason)"
         return 0
     fi
+    # Write last-checkpoint marker so the NEXT install-all.sh invocation
+    # (after the operator reboots) runs _verify_post_reboot_<STEP_NAME>
+    # before continuing. Without this, a botched reboot would silently let
+    # subsequent steps run on broken state.
+    install -d -m 0755 "$STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$STEP_NAME" > "$STATE_DIR/last-checkpoint" 2>/dev/null || true
     printf '\n%s================================================================%s\n' "$_C_WARN" "$_C_OFF"
     printf '%s  REBOOT CHECKPOINT — %s%s\n' "$_C_WARN" "$STEP_NAME" "$_C_OFF"
     printf '%s================================================================%s\n' "$_C_WARN" "$_C_OFF"
@@ -196,7 +232,7 @@ checkpoint_reboot() {
     printf '    sudo reboot\n'
     printf '    # after reboot, verify and resume:\n'
     printf '    sudo bash test-nvidia.sh\n'
-    printf '    sudo bash install-all.sh   # picks up at next pending step\n\n'
+    printf '    sudo bash install-all.sh   # auto-verifies %s post-reboot, then resumes\n\n' "$STEP_NAME"
     exit 75
 }
 
@@ -422,6 +458,248 @@ _ver_int() {
 
 
 # ============================================================================
+# SECTION 1b — Post-reboot verification
+#
+#   Every checkpoint_reboot has a matching _verify_post_reboot_<step> function
+#   that confirms the artifacts the step installed are still present AFTER the
+#   reboot. The launcher (_run_post_reboot_verify, called from install-all.sh
+#   on resume) reads $STATE_DIR/last-checkpoint, dispatches to the right
+#   verify function, and refuses to continue if it fails. Continuing past a
+#   broken checkpoint is the exact failure mode that bricked the target in
+#   earlier bring-ups.
+# ============================================================================
+
+# Verify-line print helpers. Use a per-function rc variable named
+# _VERIFY_RC (declared local in each verify function) — _v_fail bumps it
+# via the surrounding scope. Keeps each verify function's accounting local
+# so concurrent invocations (`( verify )` in a subshell) don't bleed.
+_v_pass() { log  "  PASS: $*"; }
+_v_warn() { warn "  WARN: $*"; }
+_v_fail() {
+    warn "  FAIL: $*"
+    # _VERIFY_RC must be declared in the calling verify function's scope.
+    _VERIFY_RC=1
+}
+
+# nvidia-smi must always work after every reboot — that's the WHOLE POINT
+# of the many-reboot install pattern (CLAUDE.md: bricked 3 times on driver
+# regressions). Hoisted into a helper so every verify function checks it.
+_v_check_nvidia_smi() {
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        local n
+        n=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+        _v_pass "nvidia-smi works (${n} GPU(s))"
+    else
+        _v_fail "nvidia-smi broken — the reboot lost the driver. Run test-nvidia.sh."
+    fi
+}
+
+_v_check_venv_imports() {
+    local label="$1" prefix="$2" code="$3"
+    if [[ ! -x "$prefix/venv/bin/python" ]]; then
+        _v_fail "$label venv missing at $prefix/venv"
+        return
+    fi
+    if "$prefix/venv/bin/python" - <<PY >/dev/null 2>&1
+$code
+PY
+    then
+        _v_pass "$label venv imports OK"
+    else
+        _v_fail "$label venv import check failed"
+    fi
+}
+
+# Verify what step_06_apt_userland left on disk, AFTER reboot #2.
+_verify_post_reboot_06_apt_userland() {
+    log "Post-reboot verification: 06-apt-userland"
+    local _VERIFY_RC=0
+    _v_check_nvidia_smi
+    local pkg
+    for pkg in build-essential cmake ninja-build "python${PYTHON_VER}-venv" \
+               "python${PYTHON_VER}-dev" needrestart nvtop; do
+        if _pkg_installed "$pkg"; then
+            _v_pass "$pkg installed"
+        else
+            _v_fail "$pkg NOT installed (step 06 did not stick across reboot)"
+        fi
+    done
+    if [[ "$INSTALL_DESKTOP" == "1" ]]; then
+        for pkg in xfce4 lightdm xrdp policykit-1-gnome; do
+            if _pkg_installed "$pkg"; then
+                _v_pass "$pkg installed (desktop)"
+            else
+                _v_fail "$pkg NOT installed (INSTALL_DESKTOP=1 but apt did not deliver it)"
+            fi
+        done
+    fi
+    return $_VERIFY_RC
+}
+
+# Verify what step_08_tarball_apps left on disk, AFTER reboot #3.
+_verify_post_reboot_08_tarball_apps() {
+    log "Post-reboot verification: 08-tarball-apps"
+    local _VERIFY_RC=0
+    _v_check_nvidia_smi   # needrestart restarted daemons; confirm we didn't break nvidia
+    local p
+    for p in /opt/nodejs/bin/node /usr/local/bin/bun /usr/local/bin/opencode; do
+        [[ -x "$p" ]] && _v_pass "$p present" \
+                      || _v_warn "$p missing (skipped by gather or extraction failed)"
+    done
+    if [[ -x /usr/local/bin/firefox || -x /opt/firefox/firefox ]]; then
+        _v_pass "firefox present"
+    else
+        _v_warn "firefox missing"
+    fi
+    command -v code                 >/dev/null 2>&1 && _v_pass "code on PATH"                 || _v_warn "code not on PATH"
+    command -v google-chrome-stable >/dev/null 2>&1 && _v_pass "google-chrome-stable on PATH" || _v_warn "google-chrome-stable not on PATH"
+    return $_VERIFY_RC
+}
+
+# Verify what step_09_desktop_xrdp left on disk, AFTER reboot #4.
+_verify_post_reboot_09_desktop_xrdp() {
+    if [[ "$INSTALL_DESKTOP" != "1" ]]; then
+        log "INSTALL_DESKTOP=$INSTALL_DESKTOP; skipping desktop post-reboot verify."
+        return 0
+    fi
+    log "Post-reboot verification: 09-desktop-xrdp"
+    local _VERIFY_RC=0
+    _v_check_nvidia_smi
+    if systemctl is-active --quiet xrdp 2>/dev/null; then
+        _v_pass "xrdp.service active"
+    else
+        _v_fail "xrdp.service not active (RDP login will fail)"
+    fi
+    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '$4 ~ /:3389$/' | grep -q .; then
+        _v_pass "port 3389 listening"
+    else
+        _v_fail "nothing listening on port 3389"
+    fi
+    [[ -x /etc/xrdp/startwm.sh ]] \
+        && _v_pass "/etc/xrdp/startwm.sh executable" \
+        || _v_fail "/etc/xrdp/startwm.sh missing or not executable"
+    return $_VERIFY_RC
+}
+
+# Verify what step_15_system_tuning left on disk, AFTER reboot #5.
+_verify_post_reboot_15_system_tuning() {
+    log "Post-reboot verification: 15-system-tuning"
+    local _VERIFY_RC=0
+    locate_bundle 2>/dev/null || true
+    source_bundle_metadata 2>/dev/null || true
+    _v_check_nvidia_smi   # sysctl/THP/limits change is exactly where 'bricked 3 times' happened
+    if [[ "$INSTALL_INFERENCE" == "1" ]] && _wheelhouse_has_packages "$BUNDLE_DIR/wheels/inference"; then
+        _v_check_venv_imports "inference" "$INFERENCE_PREFIX" \
+            'import torch, fastapi, uvicorn, bcrypt, cryptography, jose, sentence_transformers'
+    fi
+    if [[ "$INSTALL_TRAINING" == "1" ]] && _wheelhouse_has_packages "$BUNDLE_DIR/wheels/training"; then
+        _v_check_venv_imports "training" "$TRAINING_PREFIX" \
+            'import torch, torch_geometric'
+    fi
+    if [[ "$INSTALL_JUPYTER" == "1" ]] && _wheelhouse_has_packages "$BUNDLE_DIR/wheels/jupyter"; then
+        _v_check_venv_imports "jupyter" "$JUPYTER_PREFIX" \
+            'import jupyterlab, notebook'
+    fi
+    if [[ "$INSTALL_LLAMA" == "1" ]] && [[ -f "$BUNDLE_DIR/src/llama.cpp.tar.gz" ]]; then
+        [[ -x "$LLAMA_PREFIX/build/bin/llama-server" ]] \
+            && _v_pass "llama-server built at $LLAMA_PREFIX/build/bin/llama-server" \
+            || _v_fail "llama-server missing after step 14 build"
+    fi
+    [[ -f /etc/sysctl.d/99-llm-multigpu.conf ]] \
+        && _v_pass "/etc/sysctl.d/99-llm-multigpu.conf present" \
+        || _v_fail "/etc/sysctl.d/99-llm-multigpu.conf missing (step 15 not applied)"
+    [[ -f /etc/security/limits.d/99-llm-multigpu.conf ]] \
+        && _v_pass "/etc/security/limits.d/99-llm-multigpu.conf present" \
+        || _v_fail "/etc/security/limits.d/99-llm-multigpu.conf missing"
+    local thp
+    thp=$(awk '{for(i=1;i<=NF;i++) if($i ~ /\[.*\]/) print $i}' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+    if [[ "$thp" == "[madvise]" ]]; then
+        _v_pass "THP = madvise"
+    else
+        _v_fail "THP != madvise (current: ${thp:-unknown}) — disable-thp-defrag.service did not run on boot"
+    fi
+    local swap
+    swap=$(sysctl -n vm.swappiness 2>/dev/null)
+    if [[ "$swap" == "0" ]]; then
+        _v_pass "vm.swappiness=0"
+    else
+        _v_fail "vm.swappiness=${swap:-?} (expected 0)"
+    fi
+    local maxmap
+    maxmap=$(sysctl -n vm.max_map_count 2>/dev/null)
+    if [[ "$maxmap" == "1048576" ]]; then
+        _v_pass "vm.max_map_count=1048576"
+    else
+        _v_warn "vm.max_map_count=${maxmap:-?} (expected 1048576)"
+    fi
+    return $_VERIFY_RC
+}
+
+# Final cold-boot sanity, AFTER the post-step-17 reboot. No further install
+# steps run, so this is best-effort: hard-fail only on nvidia. Operator runs
+# `bash test-all.sh` afterwards for the full report.
+_verify_post_reboot_17_final_status() {
+    log "Post-reboot verification: 17-final-status (final cold-boot sanity)"
+    local _VERIFY_RC=0
+    _v_check_nvidia_smi
+    command -v gpu-health-check >/dev/null 2>&1 \
+        && _v_pass "gpu-health-check on PATH" \
+        || _v_warn "gpu-health-check missing"
+    if [[ "${INSTALL_LLAMA:-1}" == "1" ]]; then
+        [[ -x "$LLAMA_PREFIX/build/bin/llama-server" ]] \
+            && _v_pass "llama-server at $LLAMA_PREFIX/build/bin/llama-server" \
+            || _v_warn "llama-server missing (build failed or INSTALL_LLAMA=0 at install time)"
+    fi
+    log "  Run 'bash test-all.sh' for the full post-install report."
+    return $_VERIFY_RC
+}
+
+# Launcher hook — invoked from install-all.sh after step enumeration and
+# require_root, before the per-step loop. Reads the marker, dispatches,
+# clears on success, dies hard on failure.
+_run_post_reboot_verify() {
+    local marker="$STATE_DIR/last-checkpoint"
+    [[ -f "$marker" ]] || return 0
+    local last_step
+    last_step=$(head -1 "$marker" 2>/dev/null | tr -d ' \t\r\n')
+    if [[ -z "$last_step" ]]; then
+        log "last-checkpoint marker is empty; clearing."
+        rm -f "$marker"
+        return 0
+    fi
+    local func="_verify_post_reboot_$(printf '%s' "$last_step" | tr - _)"
+    if ! declare -F "$func" >/dev/null 2>&1; then
+        warn "No verify function defined for $last_step ($func) — clearing marker."
+        rm -f "$marker"
+        return 0
+    fi
+    log "Found post-reboot checkpoint marker: $last_step → $func"
+    local rc=0
+    # Subshell isolation; collect rc explicitly so `set -e` does not skip the
+    # recovery banner below on a failed verify.
+    ( "$func" ) || rc=$?
+    if (( rc != 0 )); then
+        printf '\n%s================================================================%s\n' "$_C_ERR" "$_C_OFF"
+        printf '%s  POST-REBOOT VERIFICATION FAILED for %s%s\n' "$_C_ERR" "$last_step" "$_C_OFF"
+        printf '%s================================================================%s\n' "$_C_ERR" "$_C_OFF"
+        printf '  The reboot after %s did not leave the system in a consistent state.\n' "$last_step"
+        printf '  See FAIL lines above. Common causes:\n'
+        printf '    - nvidia.ko did not reload (driver/kernel mismatch, missing initramfs entry)\n'
+        printf '    - apt-mark holds were released between runs\n'
+        printf '    - A package upgrade clobbered the installed state\n'
+        printf '    - sysctl/THP/limits change blocked clean boot of nvidia services\n'
+        printf '\n  Recovery:\n'
+        printf '    sudo bash test-nvidia.sh             # full nvidia stack diagnostics\n'
+        printf '    sudo bash install-all.sh --rerun %s  # re-apply the step\n' "$last_step"
+        printf '\n  Refusing to continue with later steps until %s is healthy.\n\n' "$last_step"
+        die "Post-reboot verification failed for $last_step (marker kept at $marker for debugging)."
+    fi
+    log "Post-reboot verification PASSED for $last_step — clearing marker."
+    rm -f "$marker"
+}
+
+
+# ============================================================================
 # SECTION 2 — Step list (ordered)
 # ============================================================================
 ALL_STEPS=(
@@ -616,7 +894,7 @@ step_04_apt_plan() {
 
     # Anything in this set, if upgraded post-NVIDIA, can desync the driver/kernel
     # ABI or restart PID-1-adjacent daemons. We refuse ANY of these.
-    local BASE_OS_DANGER_REGEX='^(libc6|libc6-dev|systemd|systemd-sysv|dbus|dbus-daemon|linux-image-.*|linux-headers-.*|linux-firmware|microcode|intel-microcode|amd64-microcode)$'
+    local BASE_OS_DANGER_REGEX='^(libc6|libc6-dev|libc-bin|libc-dev-bin|locales|systemd|systemd-sysv|systemd-resolved|systemd-timesyncd|systemd-oomd|libsystemd0|libsystemd-shared|libnss-systemd|libpam-systemd|udev|libudev1|dbus|dbus-daemon|dbus-user-session|linux-image-.*|linux-headers-.*|linux-modules-.*|linux-modules-extra-.*|linux-firmware|microcode|intel-microcode|amd64-microcode)$'
 
     if [[ -f "$RESUME_MARKER" ]]; then
         log "Resume marker present ($RESUME_MARKER) — base-OS work assumed complete from a prior run."
@@ -1014,9 +1292,11 @@ step_10_wheelhouse_manifests() {
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 11: venv-inference  (CPU-only RAG/FastAPI; no torch, no vLLM)
-#   See CLAUDE.md "Inference venv is CPU-only" invariant. GPU inference runs
-#   via llama.cpp's HTTP server (step 14).
+# STEP 11: venv-inference  (RAG/FastAPI + GPU torch matched to training venv)
+#   torch is pinned to the same +cu130 version as step_12_venv_training so the
+#   two venvs share a consistent CUDA/NCCL ABI. Bulk text-generation traffic
+#   still routes to llama.cpp's HTTP server (step 14); this venv handles
+#   request routing, RAG, and embedding (sentence-transformers can use GPU).
 # ────────────────────────────────────────────────────────────────────────────
 step_11_venv_inference() {
     init_step "11-venv-inference"
@@ -1055,36 +1335,54 @@ step_11_venv_inference() {
         _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" -r "$rf" 2>/dev/null || true
     done
 
-    step "4. Core inference / RAG packages (CPU-only)"
-    # NO torch / torchvision / torchaudio / vllm here — those caused multi-GPU
-    # NCCL ABI skew when this venv coexisted with the training venv (#15525,
-    # #20862, #28283). Inference workloads route through llama.cpp's HTTP server.
+    step "4. Core inference / RAG packages"
+    # torch is listed explicitly so the dependency is intentional, not a
+    # silent transitive of sentence-transformers. Pinning via the wheelhouse
+    # (gather-all.sh section 6 pre-downloads torch==2.11.0 from the cu130
+    # index) keeps inference ABI-matched to training. vLLM is excluded —
+    # its torch/NCCL pinning has historically diverged from the training
+    # venv inside the same install.
     _as_user "$_PIP" install --no-index --find-links="$WHEELS_DIR" \
+        torch torchvision torchaudio \
         sentence-transformers faiss-cpu rank-bm25 \
         transformers tokenizers safetensors huggingface-hub tiktoken \
         langchain langchain-core langchain-community langchain-ollama \
         langgraph langgraph-checkpoint langgraph-prebuilt langsmith \
         ollama tavily-python \
-        fastapi uvicorn pydantic pydantic-settings sse-starlette \
+        fastapi "uvicorn[standard]" pydantic pydantic-settings sse-starlette \
         httpx httpx-sse aiohttp aiofiles websockets \
-        passlib python-jose \
+        "passlib[bcrypt]" "python-jose[cryptography]" \
         PyMuPDF pypdf python-docx python-pptx openpyxl \
         pandas numpy Pillow python-dotenv python-multipart \
         jupyter_client ipykernel filelock tqdm rich 2>/dev/null || true
 
-    step "5. Smoke test (CPU-only)"
+    step "5. Smoke test"
     _as_user "$INFERENCE_PREFIX/venv/bin/python" - <<'PY' || warn "Inference smoke test failed."
 import importlib
-for mod in ("fastapi", "langchain", "sentence_transformers", "transformers", "tiktoken"):
+for mod in ("fastapi", "langchain", "sentence_transformers", "transformers", "tiktoken", "torch"):
     try:
         m = importlib.import_module(mod)
         ver = getattr(m, "__version__", "?")
         print(f"  {mod} {ver}")
     except Exception as e:
         print(f"  {mod}: import failed: {e}")
+try:
+    import torch
+    print(f"  torch.cuda.is_available() = {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+        print(f"  torch.version.cuda = {torch.version.cuda}")
+except Exception as e:
+    print(f"  torch CUDA probe failed: {e}")
+for mod in ("uvloop", "watchfiles", "httptools", "bcrypt", "cryptography", "jose"):
+    try:
+        importlib.import_module(mod)
+        print(f"  {mod} extra OK")
+    except Exception as e:
+        print(f"  {mod} extra import failed: {e}")
 PY
 
-    log "Inference venv ready (CPU-only RAG/FastAPI): $INFERENCE_PREFIX/venv"
+    log "Inference venv ready (RAG/FastAPI + GPU torch): $INFERENCE_PREFIX/venv"
     mark_step_ok
 }
 
@@ -1616,6 +1914,8 @@ UNIT
 step_17_final_status() {
     init_step "17-final-status"
     detect_target_user
+    locate_bundle 2>/dev/null || true
+    source_bundle_metadata 2>/dev/null || true
 
     step "1. Clear resume marker"
     rm -f "$RESUME_MARKER"
@@ -1635,7 +1935,7 @@ step_17_final_status() {
     printf '%s\n' "════════════════════════════════════════════════════════════════"
     printf '%s\n' "  INSTALL STEPS COMPLETED (per .ok markers under $STEPS_DIR)"
     printf '%s\n' "════════════════════════════════════════════════════════════════"
-    printf '  Inference venv : %s/venv  (CPU-only RAG/FastAPI; no torch, no vLLM)\n' "$INFERENCE_PREFIX"
+    printf '  Inference venv : %s/venv  (RAG/FastAPI + torch %s+%s; no vLLM)\n' "$INFERENCE_PREFIX" "${BUNDLE_TORCH_TRAINING:-2.11.0}" "${BUNDLE_TORCH_CUDA:-cu130}"
     printf '  Training venv  : %s/venv\n' "$TRAINING_PREFIX"
     printf '  Jupyter venv   : %s/venv\n' "$JUPYTER_PREFIX"
     printf '  llama-server   : %s/build/bin/llama-server\n' "$LLAMA_PREFIX"
@@ -1645,6 +1945,8 @@ step_17_final_status() {
     printf '\n'
 
     printf 'Next steps:\n'
+    printf '  sudo reboot                                    # final cold-boot sanity\n'
+    printf '  sudo bash install-all.sh                       # consumes final post-reboot marker\n'
     printf '  bash test-nvidia.sh                            # nvidia stack still healthy?\n'
     printf '  bash test-all.sh                               # full userland verify\n'
     printf '  gpu-health-check                               # quick fabric sanity\n'
@@ -1657,8 +1959,8 @@ step_17_final_status() {
     mark_step_ok
 
     if (( REBOOT_REQUIRED )); then
-        checkpoint_reboot "final phase complete AND /run/reboot-required is set — reboot then run test-nvidia.sh + test-all.sh"
+        checkpoint_reboot "final phase complete AND /run/reboot-required is set — reboot, run install-all.sh once to verify the final cold boot, then run test-nvidia.sh + test-all.sh"
     else
-        checkpoint_reboot "final phase complete — reboot to confirm sysctl/THP/limits/ops units persist from cold boot, then run test-nvidia.sh + test-all.sh"
+        checkpoint_reboot "final phase complete — reboot, run install-all.sh once to verify sysctl/THP/limits/ops units persisted, then run test-nvidia.sh + test-all.sh"
     fi
 }

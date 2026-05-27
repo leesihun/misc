@@ -420,17 +420,26 @@ fi   # phase: venvs
 # ============================================================================
 if phase_runs venvs; then
 step "Python venvs"
-# Inference venv is now CPU-only (no torch, no vLLM); probe the RAG/FastAPI
-# stack instead.
-check_venv "inference (CPU-only RAG)" "$INFERENCE_PREFIX" \
+# Inference venv runs on the SAME torch +cu130 as training (see CLAUDE.md);
+# probe torch + the RAG/FastAPI stack. vLLM is intentionally absent.
+check_venv "inference (RAG + GPU torch)" "$INFERENCE_PREFIX" \
     'import sys, importlib
-mods = ("fastapi", "langchain", "sentence_transformers", "transformers", "tiktoken")
+mods = (
+    "torch", "fastapi", "uvicorn", "uvloop", "watchfiles", "httptools",
+    "bcrypt", "cryptography", "jose", "langchain", "sentence_transformers",
+    "transformers", "tiktoken",
+)
 out = []
 for m in mods:
     try:
         out.append(f"{m}={getattr(importlib.import_module(m), \"__version__\", \"?\")}")
     except Exception as e:
         out.append(f"{m}=IMPORT_FAIL({e.__class__.__name__})")
+try:
+    import torch
+    out.append(f"cuda={torch.cuda.is_available()}")
+except Exception:
+    out.append("cuda=PROBE_FAIL")
 print(f"py{sys.version_info.major}.{sys.version_info.minor} " + " ".join(out))'
 
 check_venv "training"  "$TRAINING_PREFIX" \
@@ -519,7 +528,7 @@ else
         printf '    2. apparmor unprivileged userns restricted — sysctl kernel.apparmor_restrict_unprivileged_userns=0\n'
         printf '    3. Missing shared libs — apt-get install the names ldd reports.\n'
         printf '  busBW < 1200 GB/s on 8x B300? Check nvidia-fabricmanager status + nvidia-smi nvlink --status\n'
-        printf '  Inference venv import errors? It is CPU-only now — verify with: %s/venv/bin/pip list | grep -iE "torch|vllm" (expect EMPTY)\n' "$INFERENCE_PREFIX"
+        printf '  Inference venv import errors? It now ships torch +cu130 — verify with: %s/venv/bin/pip list | grep -iE "^(torch|vllm)\\b" (expect torch present, vllm absent)\n' "$INFERENCE_PREFIX"
         printf '  Broken dpkg? sudo apt-get -f install\n'
     fi
 fi

@@ -32,7 +32,7 @@ EXPECTED_GPUS="${EXPECTED_GPUS:-8}"
 SKIP_DCGM="${SKIP_DCGM:-0}"
 # Mirrors gather-nvidia.sh's NCCL_MIN_VER — when libnccl2 is installed on the
 # host (SKIP_NCCL=0 path), refuse < 2.27.7. 2.26.x and 2.27.0-2.27.6 deadlock
-# at AllReduce on TP>1 with Blackwell Ultra (vllm #28283, #33041, #20862).
+# at AllReduce on TP>1 with Blackwell Ultra (NCCL release notes for 2.27.7).
 NCCL_MIN_VER="${NCCL_MIN_VER:-2.27.7}"
 
 JSON_OUT=0
@@ -389,7 +389,7 @@ if [[ -n "$nccl_state" ]]; then
         if printf '%s\n%s\n' "$NCCL_MIN_VER" "$nccl_base" | sort -V -C 2>/dev/null; then
             record "dpkg: libnccl2" PASS "$nccl_ver (>= ${NCCL_MIN_VER})"
         else
-            record "dpkg: libnccl2" FAIL "$nccl_ver below NCCL_MIN_VER=${NCCL_MIN_VER} — TP>1 AllReduce deadlocks on B300 (vllm #28283/#33041/#20862)"
+            record "dpkg: libnccl2" FAIL "$nccl_ver below NCCL_MIN_VER=${NCCL_MIN_VER} — TP>1 AllReduce deadlocks on B300"
         fi
     else
         record "dpkg: libnccl2" FAIL "$nccl_ver (expected +cuda${CUDA_MAJOR}.${CUDA_MINOR})"

@@ -65,7 +65,7 @@ CUDA_MAJOR="${CUDA_MAJOR:-13}"
 CUDA_MINOR="${CUDA_MINOR:-0}"
 NCCL_CUDA_SUFFIX="${NCCL_CUDA_SUFFIX:-cuda${CUDA_MAJOR}.${CUDA_MINOR}}"
 # Minimum NCCL major.minor.patch for B300 (Blackwell Ultra). 2.26.x and
-# 2.27.0-2.27.6 deadlock at AllReduce on TP>1 (vllm #28283, #33041, #20862).
+# 2.27.0-2.27.6 deadlock at AllReduce on TP>1 (NCCL 2.27.7 release notes).
 # 2.27.7 is the first stable build for B200/B300; keep this as a hard floor.
 NCCL_MIN_VER="${NCCL_MIN_VER:-2.27.7}"
 

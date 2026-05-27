@@ -28,7 +28,8 @@
 #   Env knobs (all honored by every step function):
 #     BUNDLE_DIR, BUNDLE_BIN, PYTHON_VER, SCRATCH_ROOT
 #     INSTALL_INFERENCE, INSTALL_TRAINING, INSTALL_JUPYTER, INSTALL_LLAMA
-#     INSTALL_DESKTOP  (inference venv is CPU-only — no INSTALL_VLLM knob)
+#     INSTALL_DESKTOP  (both inference and training venvs run torch +cu130;
+#                       vLLM remains intentionally excluded — see CLAUDE.md)
 #     CUDA_ARCH_LIST (default 100-real;103-real for B200+B300)
 #     BUILD_BLAS, JOBS, FORCE, SKIP_PREFLIGHT
 #     SKIP_CHECKPOINTS=1 to bypass the per-phase reboot breaks (NOT recommended)
@@ -193,6 +194,13 @@ if [[ -f "$RESUME_MARKER" && "$MODE" != "one" ]]; then
 elif [[ -f "$RESUME_MARKER" && "$MODE" == "one" ]]; then
     log "Resume marker present ($RESUME_MARKER) but --run was given; honoring explicit re-run request."
 fi
+
+# Run post-reboot verification if checkpoint_reboot exited the previous run.
+# Reads $STATE_DIR/last-checkpoint, dispatches to _verify_post_reboot_NN_name
+# (defined in install-all-steps.sh), dies hard on failure. Refusing to
+# proceed when verification fails is intentional — continuing past a broken
+# checkpoint is exactly how the target got bricked in earlier bring-ups.
+_run_post_reboot_verify
 
 # ── Drive each step ─────────────────────────────────────────────────────────
 log "Launcher: ${MODE}  steps=${#TO_RUN[@]}  run-id=$RUN_ID"

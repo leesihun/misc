@@ -585,8 +585,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
 #
 # We intentionally do NOT touch LD_LIBRARY_PATH here. Prepending
 # /usr/local/cuda/lib64 globally would override the RUNPATH baked into PyTorch
-# / vLLM wheels and silently replace their bundled libnccl / libcudnn with
-# the system copies, producing multi-GPU ABI skew (vLLM #15525, #20862).
+# wheels and silently replace their bundled libnccl / libcudnn with the system
+# copies, producing multi-GPU CUDA/NCCL ABI skew at process start.
 # PyTorch wheels resolve their own CUDA libs via $ORIGIN RUNPATH; leave them
 # alone. ld.so.cache is searched AFTER RUNPATH, so the entry below only
 # affects binaries with no RUNPATH (llama-server, llama-cli).
@@ -628,10 +628,9 @@ fi
 #
 # System libnccl is a known foot-gun: when /usr/local/cuda/lib64 ends up in
 # the dynamic-linker search path, system libnccl.so.2 silently overrides the
-# NCCL version PyTorch/vLLM wheels bundle (nvidia-nccl-cu13). That ABI skew
-# produces multi-GPU hangs at the first all_reduce
-# (see vLLM Issue #15525, #20862, #28283). Letting each venv carry its own
-# matched NCCL eliminates this entire failure class.
+# NCCL version PyTorch wheels bundle (nvidia-nccl-cu13). That ABI skew
+# produces multi-GPU hangs at the first all_reduce. Letting each venv carry
+# its own matched NCCL eliminates this entire failure class.
 #
 # Set SKIP_NCCL=0 only if you have a non-Python consumer that must dlopen
 # libnccl.so.2 from /usr (rare; almost no one outside MPI test harnesses).

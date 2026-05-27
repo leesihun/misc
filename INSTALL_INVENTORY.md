@@ -42,11 +42,13 @@ than rebooting it 4-5 times.
 16. sudo reboot                                       # confirm sysctl/THP/limits persist from cold boot
 17. sudo bash install-all.sh                          # resumes 16-17, exits 75 at final-status
 18. sudo reboot                                       # final cold-boot sanity
-19. sudo bash test-nvidia.sh && bash test-all.sh      # full verify
-20. gpu-health-check
+19. sudo bash install-all.sh                          # consumes final post-reboot marker
+20. sudo bash test-nvidia.sh && bash test-all.sh      # full verify
+21. gpu-health-check
 ```
 
-**Total mandatory reboots: 5** (one per failure surface). Set `SKIP_CHECKPOINTS=1`
+**Total mandatory reboots: 6 by default** (NVIDIA + five userland checkpoints;
+5 total when `INSTALL_DESKTOP=0` skips the step-09 desktop checkpoint). Set `SKIP_CHECKPOINTS=1`
 to bypass the userland reboots — NOT recommended on a box that has bricked
 in prior bring-up attempts.
 
@@ -72,7 +74,7 @@ fetch from the internet on the target.**
 | `pip install … --find-links https://data.pyg.org/whl/torch-2.11.0+cu130.html` | Same wheelhouse — PyG wheels are pre-downloaded into `wheels/training/` |
 | `git clone https://github.com/ggml-org/llama.cpp` | `tar -xzf $BUNDLE_DIR/src/llama.cpp.tar.gz` — source archived at gather time, commit pinned in `meta/target.env` (`BUNDLE_LLAMA_COMMIT`) |
 | `curl https://developer.download.nvidia.com/.../cuda-keyring_1.1-1_all.deb` | Pinned in the NVIDIA bundle; install-nvidia.sh registers the file:// repo, never reaches the internet |
-| `pip install vllm` (PyPI) | **No longer bundled.** The inference venv is CPU-only; GPU inference goes through llama.cpp's HTTP server (step 14). |
+| `pip install vllm` (PyPI) | **Not bundled.** vLLM's torch/NCCL pinning has historically diverged from the training venv inside the same install. Bulk text-generation goes through llama.cpp's HTTP server (step 14); the inference venv uses the same torch +cu130 as training for sentence-transformers / RAG. |
 | `nodejs.org` LTS tarball | Pre-staged at `$BUNDLE_DIR/apps/nodejs.tar.xz` |
 | `releases.mozilla.org` Firefox tarball | Pre-staged at `$BUNDLE_DIR/apps/firefox.tar.xz` |
 | `update.code.visualstudio.com/.../linux-deb-x64/stable` | Pre-staged at `$BUNDLE_DIR/apps/vscode.deb` |
@@ -195,17 +197,18 @@ a single step interactively: `sudo bash install-all.sh --run NN`.
 | # | Function | Concern |
 |---|----------|---------|
 | — | (helpers) | Shared helpers at the top of `install-all-steps.sh`: log/warn/die/step, step lifecycle (`init_step`/`mark_step_ok`/`checkpoint_reboot`), ERR/EXIT traps, apt helpers (`_apt_install`, `_pkg_satisfied`, `_normalize_pkg_name` t64 mapping), wheelhouse helpers, `_as_user` (drop to SUDO_USER), bundle metadata sourcing (incl. nvidia bundle's `meta/target.env` → CUDA_MAJOR/MINOR), env-knob defaults. |
+| — | (post-reboot verify) | Section 1b in `install-all-steps.sh`: `checkpoint_reboot` writes `/var/lib/install-all/last-checkpoint` with its step name before `exit 75`. The next `install-all.sh` invocation (after the operator reboots) calls `_run_post_reboot_verify`, which dispatches to `_verify_post_reboot_<step>` (defined for 06/08/09/15/17 — every step that calls `checkpoint_reboot`). Each verify confirms `nvidia-smi` still works plus the step's artifacts (packages installed, files present, services active, sysctls applied). Failure dies hard and **refuses to run later steps** — keeps the marker for debugging. |
 | 01 | `step_01_preflight` | Bundle locate + SHA256 + extract, variant guard (`BUNDLE_VARIANT=prepped`), runs `pre-install-check.sh`. |
 | 02 | `step_02_scratch` | `$SCRATCH_ROOT` directory creation + chown. |
 | 03 | `step_03_apt_repo` | System-lib holds, local file:// apt repo, `apt-get update`. **No NVIDIA pin** (install-nvidia.sh's pin already covers nvidia packages and points at the bundle); **no nvidia-* hold** (install-nvidia.sh already holds them). |
-| 04 | `step_04_apt_plan` | `apt -s` dry-run. **STRICT** base-OS gate: any libc6/systemd/dbus/kernel/firmware/microcode upgrade trigger is a hard FAIL (no `FORCE=1` escape). |
+| 04 | `step_04_apt_plan` | `apt -s` dry-run. **STRICT** base-OS gate: any libc/systemd/udev/dbus/kernel/firmware/microcode upgrade trigger is a hard FAIL (no `FORCE=1` escape). `gather-all.sh` also prunes these debs from the userland bundle before indexing. |
 | 05 | `step_05_reboot_trigger_packages` | **Strict no-op asserter.** If step 04 emitted any triggers, refuse — under the strict gate this branch should never fire. Kept for back-compat with the `$RESUME_MARKER` mechanism. |
 | 06 | `step_06_apt_userland` | Toolchain, `python${PYTHON_VER}-venv/dev`, needrestart, CLI tools, GUI runtime libs, scientific libs (incl. libssl-dev for llama.cpp OpenSSL HTTP), optional xfce4+xrdp+lightdm. **`checkpoint_reboot`** at end. |
 | 07 | `step_07_app_debs` | VS Code + Chrome `.deb` install via `apt install ./`, AppArmor reload, `kernel.apparmor_restrict_unprivileged_userns=0` sysctl. |
 | 08 | `step_08_tarball_apps` | Firefox, Node.js, Bun, Opencode (tarballs). `needrestart -r a`. **`checkpoint_reboot`** at end. |
 | 09 | `step_09_desktop_xrdp` | xrdp startwm → `startxfce4`, polkit shutdown rules, UFW 3389. Honors `INSTALL_DESKTOP`. **`checkpoint_reboot`** at end. |
 | 10 | `step_10_wheelhouse_manifests` | `generate_wheelhouse_requirements` — emits per-wheelhouse `requirements.txt`. |
-| 11 | `step_11_venv_inference` | **CPU-only** inference venv at `$INFERENCE_PREFIX/venv` — FastAPI + langchain + sentence-transformers + RAG stack. **No torch, no vLLM** (both removed; multi-GPU NCCL ABI footgun). Honors `INSTALL_INFERENCE`. GPU inference is the llama.cpp HTTP server (step 14). |
+| 11 | `step_11_venv_inference` | Inference venv at `$INFERENCE_PREFIX/venv` — torch +cu130 (same version as training venv), FastAPI + langchain + sentence-transformers + RAG stack. **No vLLM** (its torch/NCCL pinning diverges from training). Honors `INSTALL_INFERENCE`. Bulk generation routes through llama.cpp's HTTP server (step 14); this venv handles request routing, RAG, and embedding (sentence-transformers can use GPU). |
 | 12 | `step_12_venv_training` | Training venv — torch (cu130), torch-geometric + extensions (pyg_lib, scatter, sparse, cluster; torch_spline_conv unavailable on cu130), SciPy stack. |
 | 13 | `step_13_venv_jupyter` | JupyterLab venv, ipykernel registration, `~/start-jupyter.sh` launcher. |
 | 14 | `step_14_llamacpp_build` | llama.cpp build. cmake flags: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. Drops deprecated `LLAMA_CURL`. NCCL link-time auto-disabled because `SKIP_NCCL=1` is the install-nvidia.sh default (intentional). |
@@ -373,19 +376,27 @@ After install: `systemctl reload apparmor` to register Chrome/VS Code AppArmor p
 
 ### `/scratch/llm_inference/venv` (INSTALL_INFERENCE=1)
 
-**This venv is CPU-only.** torch (cu130) and vLLM used to live here but were
-removed — their coexistence with the training venv caused multi-GPU NCCL ABI
-skew (vLLM #15525, #20862, #28283). GPU inference is the llama.cpp HTTP
-server (step 14); this venv hosts the FastAPI / langchain / RAG glue around
-it.
+**This venv ships torch +cu130 — same version as the training venv.** Separate
+venvs are separate processes and each dlopen their own `libnccl.so.2`, so they
+don't conflict at runtime (an earlier version of this doc cited #15525 /
+#20862 / #28283 as "NCCL ABI skew between venvs"; those issues are actually
+unrelated PRs). The real NCCL pitfall (#112285 / #122571) is *within* a
+single venv when two packages pull mismatched `nvidia-nccl-cu*` wheels —
+which `gather-all.sh` avoids by pinning torch from the cu130 index before
+the resolver runs. Bulk text-generation traffic still goes through llama.cpp's
+HTTP server (step 14); sentence-transformers here can use the GPU for
+embedding.
 
 **Bootstrap:** pip, wheel, setuptools
 
-**(historical, REMOVED — kept for archaeology) PyTorch + vLLM stack:**
-- ~~torch==2.11.0+cu130~~
-- ~~torchvision~~
-- ~~torchaudio~~
-- ~~vllm (latest, resolved against cu130 wheel index)~~
+**PyTorch stack (matches the training venv):**
+- torch==2.11.0+cu130
+- torchvision (cu130)
+- torchaudio (cu130)
+
+**vLLM intentionally NOT bundled** — its torch/NCCL pinning has historically
+diverged from the training venv inside the same install. Re-adding it would
+re-create the in-process NCCL version-mismatch class of bug.
 
 **Transformers / NLP:**
 - transformers, tokenizers, safetensors, huggingface-hub, tiktoken
@@ -564,10 +575,11 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | `/var/lib/install-all/steps/NN-name.failed` | Step failure marker. Written by the EXIT trap in `install-all-steps.sh` (`_step_on_exit`) when a step exits non-zero (excluding exit 75, the `checkpoint_reboot` distinguished code). Launcher reports the first failed step by name. |
 | `/var/lib/install-all/apt-requested.txt` | Step 04 dumps the apt-get install list (after t64 normalization) |
 | `/var/lib/install-all/apt-proposed.txt` | Step 04 dumps every `(Inst|Conf)` line from `apt -s` simulation |
-| `/var/lib/install-all/apt-reboot-triggers.txt` | Step 04 dumps reboot-triggering packages (libc6/systemd/dbus, +DKMS-danger if FORCE=1); step 05 reads this to decide whether to run Stage 1 |
+| `/var/lib/install-all/apt-reboot-triggers.txt` | Step 04 dumps reboot-triggering packages (libc/systemd/udev/dbus/kernel/firmware/microcode); step 05 reads this to decide whether to run Stage 1 |
 | `/var/lib/install-all/system-libs-held.txt` | Step 03 audit list of system runtime libs held (libstdc++6/libgcc-s1/libgomp1/libc6) |
 | `/var/lib/install-all/run-<RUN_ID>/warnings.log` | Per-run accumulator of step `warn` calls |
 | `/var/lib/install-all/run-<RUN_ID>/errors.log` | Per-run accumulator of step `die` / ERR-trap calls |
+| `/var/lib/install-all/last-checkpoint` | Post-reboot checkpoint marker. Written by `checkpoint_reboot` (the step name) right before `exit 75`. Next `install-all.sh` invocation reads it, runs `_verify_post_reboot_<step>`, clears on success, **preserves on failure** so the operator can re-run diagnostics. |
 | `/var/lib/install-all-prepped/stage1.done` | Resume marker, only present during conditional 2-stage reboot path. Steps 03/04/05 short-circuit when present; deleted by step 17 at end of install. |
 
 ### Logs (transient ??kept for debug)
@@ -616,7 +628,7 @@ Built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100;103 -DGGML_BLAS=ON -DL
 | Node.js | ~120 MB |
 | Bun | ~100 MB |
 | Opencode | ~80 MB |
-| Inference venv (CPU-only RAG/FastAPI) | ~600 MB |
+| Inference venv (RAG/FastAPI + torch +cu130) | ~1.2 GB |
 | Training venv | ~5 GB |
 | Jupyter venv | ~1 GB |
 | llama.cpp build artifacts | ~3 GB |

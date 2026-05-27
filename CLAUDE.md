@@ -22,13 +22,15 @@ The installer is split into **two independent bundles**, run in strict sequence 
 
 Canonical target sequence (also documented at the top of [install-all.sh:11-17](install-all.sh#L11-L17)):
 
-**5 mandatory reboots** — one per failure surface. The user has bricked this
+**6 mandatory reboots by default** — one per failure surface. The user has bricked this
 exact target three times in prior bring-up attempts; verification ergonomics
 beat install speed here. Each `install-all.sh` invocation auto-skips
 already-`.ok` steps and resumes at the next pending one. `checkpoint_reboot`
 (defined in [install-all-steps.sh](install-all-steps.sh)) fires
 `exit 75` at the end of steps 06, 08, 09 (if desktop), 15, and 17; the
-launcher catches it and prints a "REBOOT REQUIRED" banner. Set
+launcher catches it and prints a "REBOOT REQUIRED" banner. The invocation
+after each reboot consumes `/var/lib/install-all/last-checkpoint` and verifies
+that the previous phase actually stuck before later steps run. Set
 `SKIP_CHECKPOINTS=1` to bypass — NOT recommended on this target.
 
 ```
@@ -41,7 +43,7 @@ sudo bash test-nvidia.sh                              # fabric Completed? peerme
 # Phase 2 — Userland readiness
 sudo bash pre-install-check.sh                        # strict base-OS gate vs userland bundle
 
-# Phase 3 — Userland install (4 checkpoint reboots)
+# Phase 3 — Userland install (5 checkpoint reboots when INSTALL_DESKTOP=1)
 sudo bash install-all.sh                              # 01-06; exit 75 after apt userland
 sudo reboot                                           # REBOOT #2 — confirm nvidia survived apt
 sudo bash test-nvidia.sh && bash test-all.sh --phase userland
@@ -54,6 +56,8 @@ sudo bash test-all.sh --phase desktop
 sudo bash install-all.sh                              # 10-15; exit 75 after sysctl tuning
 sudo reboot                                           # REBOOT #5 — confirm tuning persists
 sudo bash install-all.sh                              # 16-17; exit 75 at final-status
+sudo reboot                                           # REBOOT #6 — final cold-boot sanity
+sudo bash install-all.sh                              # consumes final post-reboot marker
 
 # Phase 4 — Final verify
 sudo bash test-nvidia.sh && bash test-all.sh
@@ -86,7 +90,7 @@ gpu-health-check
 - **CUDA arch list `100-real;103-real`** for B300 (sm_103 Blackwell Ultra) + B200 (sm_100). `-real` strips PTX because the hardware is fixed. Used when building llama.cpp; default in `install-all-steps.sh`.
 - **llama.cpp cmake flags (2026-05 baseline)**: `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real -DLLAMA_OPENSSL=ON -DLLAMA_BUILD_UI=OFF`. **`-DLLAMA_CURL=ON` is deprecated** (llama.cpp #18922, Jan 2026); the OpenSSL path requires `libssl-dev` (present in `gather-all.sh`).
 - **Python 3.12** + **torch 2.11.0+cu130** + PyG cu130 wheels from `data.pyg.org/whl/torch-2.11.0+cu130.html`. Pass `torch==2.11.0` to pip (NOT `torch==2.11.0+cu130` — the `+cu130` suffix is internal to the wheel filename). Don't bump these without updating both gather scripts, both inventory sections, and the cu130 wheel index references.
-- **Inference venv is CPU-only.** `step_11_venv_inference` in [install-all-steps.sh](install-all-steps.sh) does NOT install torch, torchvision, torchaudio, or vLLM. Multi-GPU NCCL ABI skew between an inference-venv torch and the training-venv torch was the recurring cause of #15525 / #20862 / #28283. GPU inference lives in llama.cpp's HTTP server (`step_14_llamacpp_build`). Do not re-add torch or vLLM to the inference venv or its wheelhouse without solving the NCCL coexistence story first.
+- **Both venvs pin torch to the same `${TORCH_VER_TRAINING}+cu130`.** `gather-all.sh` explicitly downloads `torch==2.11.0` from `https://download.pytorch.org/whl/cu130` into BOTH `wheels/inference/` and `wheels/training/` *before* any transitive resolver runs. This is the real invariant — *not* "inference is CPU-only" (an earlier note claimed multi-GPU NCCL ABI skew between separate venvs and cited #15525/#20862/#28283; those three are actually unrelated PRs about `reflection_pad2d`, `jit.trace` forward-hooks, and clang-tidy fixes). The real NCCL pitfall (PyTorch #112285, #122571) is **within a single venv** when two packages pull mismatched `nvidia-nccl-cu*` wheels; separate venvs are separate processes and each dlopen their own `libnccl.so.2`. Inference uses sentence-transformers/transformers GPU-capable; bulk generation still routes to llama.cpp's HTTP server (`step_14_llamacpp_build`). **vLLM remains excluded** — its torch/NCCL pinning is too aggressive and historically diverges from the training venv inside the same install. If you bump `TORCH_VER_TRAINING`, the inference download in section 6 of `gather-all.sh` must move with it; otherwise pip silently resolves torch from PyPI default (currently 2.12.0) and breaks PyG `+pt211cu130` ABI alignment.
 - **Install prefixes default to `/scratch/`** (no `$HOME` dependency). `INFERENCE_PREFIX`, `TRAINING_PREFIX`, `JUPYTER_PREFIX`, `LLAMA_PREFIX` all branch off `SCRATCH_ROOT`.
 - **DOCA-OFED is vendor-installed** — never bundle it; `pre-install-nvidia.sh` only verifies `ofed_info -s` shows DOCA 3.2+.
 - **Bundle variant marker** — `meta/target.env` in the bundle carries `BUNDLE_VARIANT=prepped`. `install-all.sh` refuses to run a bare-metal bundle on a prepped server (and vice versa). Don't remove the gate.
